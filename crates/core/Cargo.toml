@@ -1,0 +1,11 @@
+[package]
+name = "aurora-core"
+description = "Pure-Rust core library of the Aurora Android music app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]

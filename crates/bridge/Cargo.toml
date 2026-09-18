@@ -1,0 +1,14 @@
+[package]
+name = "aurora-bridge"
+description = "JNI bridge exposing aurora-core to the Android app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "aurora_bridge"
+crate-type = ["cdylib"]
+
+[dependencies]
+aurora-core = { path = "../core" }
+jni = "0.21"

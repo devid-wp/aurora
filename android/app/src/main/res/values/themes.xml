@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Framework-only theme; no AppCompat dependency needed yet. -->
+    <style name="Theme.Aurora" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

@@ -1,0 +1,12 @@
+# Linker configuration for the Android targets.
+#
+# `aarch64-linux-android-clang` is the NDK-style clang that ships with
+# Termux. On other machines, point this at the Android NDK's clang, e.g.:
+#
+#   [target.aarch64-linux-android]
+#   linker = "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
+#
+# or use `cargo ndk` which configures all of this automatically.
+
+[target.aarch64-linux-android]
+linker = "aarch64-linux-android-clang"

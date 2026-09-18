@@ -8,8 +8,9 @@ This repository currently contains only the minimal foundation for that app:
 - a thin JNI bridge that exposes the core to Android,
 - a minimal Android app shell that loads the bridge.
 
-No features are implemented yet. Player, streaming, downloading, search,
-backend, auth and playlists are all out of scope for now and will be added as
+The Android shell currently contains a minimal home screen with placeholder
+sections for Library, Search and Now Playing. Player, streaming, downloading,
+backend, auth and playlists are still out of scope and will be added as
 development proceeds.
 
 ## Repository layout
@@ -100,8 +101,8 @@ gradle wrapper
 ./gradlew :app:assembleDebug
 ```
 
-The app shows a single screen that loads the Rust core through JNI and prints
-the Aurora version, proving the foundation is wired end to end.
+The app shows a minimal black-and-purple home screen. It loads the Rust core
+through JNI as part of startup, proving the foundation is wired end to end.
 
 ## Roadmap (planned, not implemented)
 

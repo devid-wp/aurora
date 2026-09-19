@@ -1,6 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- ── Permissions ──────────────────────────────────────────────────── -->
+
+    <!-- Read audio files: granular permission on API 33+, storage on older -->
+    <uses-permission
+        android:name="android.permission.READ_MEDIA_AUDIO"
+        android:minSdkVersion="33" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <!-- Required for any foreground service (since API 28) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+    <!-- Required on API 34+ for foreground services of type mediaPlayback -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+
+    <!-- Network access for the SoundCloud API and stream/download URLs -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <queries>
+        <!-- Reveal other apps that can open the SoundCloud authorization URL -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+    </queries>
+
     <application
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
@@ -9,12 +36,36 @@
 
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- SoundCloud OAuth callback: aurora://soundcloud/callback -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="aurora"
+                    android:host="soundcloud"
+                    android:pathPrefix="/callback" />
+            </intent-filter>
         </activity>
+
+        <!--
+            PlaybackService runs as a foreground service so audio continues
+            when the screen is off.  foregroundServiceType="mediaPlayback"
+            is required on API 34+ when calling startForeground() with the
+            FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK flag.
+        -->
+        <service
+            android:name=".PlaybackService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
     </application>
 
 </manifest>

@@ -2,16 +2,22 @@
 
 Aurora is an Android music app with a **Rust core**.
 
-This repository currently contains only the minimal foundation for that app:
+The repository contains the Android application and its Rust foundation:
 
 - a pure-Rust core library,
 - a thin JNI bridge that exposes the core to Android,
-- a minimal Android app shell that loads the bridge.
+- a local-library music player with Aurora UI, synchronized players, queue,
+  search, settings, and Android media-session integration.
 
-The Android shell currently contains a minimal home screen with placeholder
-sections for Library, Search and Now Playing. Player, streaming, downloading,
-backend, auth and playlists are still out of scope and will be added as
-development proceeds.
+The Android app scans the device MediaStore for local audio, loads real
+artwork, and keeps playback in a foreground service so controls continue to
+work from notifications, lock screen, Bluetooth/headset actions, and Android
+media interfaces. SoundCloud streaming, search, and download are implemented
+against the current official SoundCloud API using OAuth (authorization code +
+PKCE with client-credentials fallback) with credentials supplied at runtime:
+see `app/src/main/java/com/aurora/app/source/SoundCloudSource.kt`. The app
+builds and runs without credentials ("SoundCloud is not configured" state);
+playlists and a backend remain out of scope.
 
 ## Repository layout
 
@@ -27,7 +33,7 @@ development proceeds.
 │   │       └── error.rs          # shared Error/Result types
 │   └── bridge/                   # aurora-bridge — JNI cdylib loaded by Android
 │       └── src/lib.rs            # Java_com_aurora_app_AuroraCore_* exports
-└── android/                      # Android app shell (Gradle + Kotlin)
+└── android/                      # Android app (Gradle + Kotlin)
     ├── build.gradle.kts
     ├── settings.gradle.kts
     ├── gradle.properties
@@ -37,9 +43,13 @@ development proceeds.
         └── src/main/
             ├── AndroidManifest.xml
             ├── java/com/aurora/app/
-            │   ├── AuroraCore.kt # JNI facade (loads libaurora_bridge.so)
-            │   └── MainActivity.kt
-            └── res/              # minimal resources (theme, strings, icon)
+            │   ├── AuroraCore.kt       # JNI facade
+            │   ├── MainActivity.kt      # Aurora screens and shared playback UI
+            │   ├── PlaybackService.kt   # MediaPlayer + MediaSession state
+            │   ├── MusicScanner.kt      # MediaStore library access
+            │   ├── ArtworkLoader.kt     # Cached artwork and fallback covers
+            │   └── Track.kt             # Local track model
+            └── res/                    # theme, strings, and vector icons
 ```
 
 Design rules:
@@ -101,19 +111,19 @@ gradle wrapper
 ./gradlew :app:assembleDebug
 ```
 
-The app shows a minimal black-and-purple home screen. It loads the Rust core
-through JNI as part of startup, proving the foundation is wired end to end.
+The app shows the Aurora experience across Home, Search, Library, Settings,
+Mini Player, Full Player, and Queue. The foreground playback service remains
+the single source of truth for track, progress, queue, shuffle, and repeat.
 
-## Roadmap (planned, not implemented)
+## Scope
 
-- Player
-- Streaming
-- Downloading (offline)
-- Search
-- Backend / API client
-- Auth
-- Playlists
-- UI beyond the placeholder activity
+Implemented: local MediaStore scanning, artwork loading, search, library
+navigation, favorites, recent history, queue display, synchronized mini/full
+players, seeking, shuffle/repeat, foreground playback, notifications,
+lock-screen/media controls, audio focus, and Rust JNI startup.
+
+Out of scope: streaming, downloading/offline sync, backend/API access, auth,
+and playlists.
 
 ## License
 

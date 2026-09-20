@@ -620,7 +620,7 @@ class MainActivity : Activity() {
         miniPlayBtn?.setImageResource(res)
         miniPlayBtn?.imageTintList = ColorStateList.valueOf(if (isPlaying) text else purple)
         fpPlayBtn?.setImageResource(res)
-        fpPlayBtn?.background = circle(if (isPlaying) purple else purple)
+        fpPlayBtn?.background = circle(purple)
         heroPlayBtn?.setImageResource(res)
     }
 
@@ -3172,11 +3172,15 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, WC, 1f)
         }
-        fpTitle = label("Aurora Track", 30, text, true)
+        fpTitle = label("Nothing playing", 30, text, true)
         fpTitle?.maxLines = 2
         fpTitle?.ellipsize = TextUtils.TruncateAt.END
-        fpArtist = label("Aurora Artist", 14, textSecondary, false)
-        fpAlbum = label("Your Library", 11, textMuted, false)
+        fpArtist = label("Choose a song to start listening", 14, textSecondary, false)
+        fpArtist?.maxLines = 1
+        fpArtist?.ellipsize = TextUtils.TruncateAt.END
+        fpAlbum = label("", 11, textMuted, false)
+        fpAlbum?.maxLines = 1
+        fpAlbum?.ellipsize = TextUtils.TruncateAt.END
         metaText.addView(fpTitle)
         metaText.addView(vGap(2))
         metaText.addView(fpArtist)
@@ -3485,6 +3489,17 @@ class MainActivity : Activity() {
             onTrackChanged(cur)
             onPlayStateChanged(svc?.isPlaying == true)
             onProgressUpdate(svc?.positionMs ?: 0, svc?.durationMs ?: 0)
+        } else {
+            // Nothing has ever played: show an honest empty state, never fake track data.
+            fpTitle?.text = "Nothing playing"
+            fpArtist?.text = "Choose a song to start listening"
+            fpAlbum?.text = ""
+            fpPosTxt?.text = "0:00"
+            fpDurTxt?.text = "0:00"
+            fpSeekBar?.max = 1
+            fpSeekBar?.progress = 0
+            onPlayStateChanged(false)
+            updateFullPlayerQueue()
         }
         fullPlayerOverlay?.let { view ->
             view.visibility = View.VISIBLE

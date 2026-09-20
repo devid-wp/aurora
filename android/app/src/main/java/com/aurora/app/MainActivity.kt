@@ -2369,13 +2369,23 @@ class MainActivity : Activity() {
         return card
     }
 
+    /** Terminal download states are finished and never receive further progress. */
+    private fun isDownloadTerminal(state: DownloadState): Boolean =
+        state == DownloadState.COMPLETED || state == DownloadState.FAILED || state == DownloadState.CANCELLED
+
     private fun showDownloadsScreen() {
         activeDownloadView = true
         trackFilterRow?.visibility = View.GONE
         libraryContainer?.removeAllViews()
-        libraryContainer?.addView(buildSettingRow("‹  Downloads", "Transfer queue and progress", "Back") { renderLibrarySection() })
+        val list = downloadManager.getAll().sortedByDescending { it.jobId }
+        val activeCount = list.count { !isDownloadTerminal(it.state) }
+        val completedCount = list.count { it.state == DownloadState.COMPLETED }
+        val subtitle = when {
+            list.isEmpty() -> "Transfer queue and progress"
+            else -> "$activeCount active • $completedCount completed"
+        }
+        libraryContainer?.addView(buildSettingRow("‹  Downloads", subtitle, "Back") { renderLibrarySection() })
         libraryContainer?.addView(vGap(4))
-        val list = downloadManager.getAll().sortedByDescending { it.state.ordinal }
         val sections = listOf(
             DownloadState.DOWNLOADING,
             DownloadState.RESOLVING,
@@ -2451,8 +2461,11 @@ class MainActivity : Activity() {
             clipToOutline = true
             outlineProvider = roundRectOutline(12)
         }
-        val fallbackTrack = Track(0L, progress.title.ifBlank { "Aurora" }, progress.artist.ifBlank { "Local" }, "", progress.totalBytes.coerceAtLeast(0L), android.net.Uri.EMPTY, 0L)
-        ArtworkLoader.loadArtwork(this, fallbackTrack, dp(52), art)
+        // Prefer the indexed library track for artwork once the finished file
+        // is in Aurora storage; otherwise use honest generative art (no fakes).
+        val artTrack = findLibraryTrackForDownload(progress)
+            ?: Track(0L, progress.title.ifBlank { "Aurora" }, progress.artist.ifBlank { "Local" }, "", progress.totalBytes.coerceAtLeast(0L), android.net.Uri.EMPTY, 0L)
+        ArtworkLoader.loadArtwork(this, artTrack, dp(52), art)
         artWrap.addView(art)
         header.addView(artWrap)
 
@@ -2460,54 +2473,86 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, WC, 1f)
         }
-        meta.addView(label(progress.title.ifBlank { "Audio transfer" }, 14, text, true))
+        meta.addView(label(progress.title.ifBlank { "Audio transfer" }, 14, text, true).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        })
         meta.addView(vGap(2))
-        meta.addView(label(progress.artist.ifBlank { progress.source }, 12, textSecondary, false))
+        meta.addView(label(progress.artist.ifBlank { progress.source }, 12, textSecondary, false).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        })
         header.addView(meta)
 
-        if (progress.state == DownloadState.COMPLETED || progress.state == DownloadState.FAILED || progress.state == DownloadState.CANCELLED || progress.state == DownloadState.PAUSED) {
-            val badge = TextView(this).apply {
-                text = when (progress.state) {
-                    DownloadState.COMPLETED -> "Completed"
-                    DownloadState.FAILED -> "Failed"
-                    DownloadState.CANCELLED -> "Cancelled"
-                    DownloadState.PAUSED -> "Paused"
-                    else -> progress.state.name
-                }
-                setTextColor(if (progress.state == DownloadState.FAILED) Color.rgb(255, 100, 100) else purple)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+        val badgeColor = when (progress.state) {
+            DownloadState.COMPLETED -> Color.rgb(120, 220, 160)
+            DownloadState.FAILED -> Color.rgb(255, 100, 100)
+            else -> purple
+        }
+        val badge = TextView(this).apply {
+            text = when (progress.state) {
+                DownloadState.QUEUED -> "Queued"
+                DownloadState.RESOLVING -> "Resolving"
+                DownloadState.DOWNLOADING -> "Downloading"
+                DownloadState.PROCESSING -> "Processing"
+                DownloadState.VERIFYING -> "Verifying"
+                DownloadState.COMPLETED -> "Completed"
+                DownloadState.FAILED -> "Failed"
+                DownloadState.CANCELLED -> "Cancelled"
+                DownloadState.PAUSED -> "Paused"
             }
-            header.addView(badge)
+            setTextColor(badgeColor)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+        }
+        header.addView(badge)
+        // A finished download is a real library track: tapping it plays it
+        // through the existing PlaybackService (no second player).
+        if (progress.state == DownloadState.COMPLETED) {
+            card.isClickable = true
+            card.isFocusable = true
+            card.foreground = ripple()
+            card.setOnClickListener { playCompletedDownload(progress) }
         }
         card.addView(header)
 
         if (progress.state in setOf(DownloadState.DOWNLOADING, DownloadState.RESOLVING, DownloadState.PROCESSING, DownloadState.VERIFYING, DownloadState.QUEUED)) {
             card.addView(vGap(10))
-            val bar = View(this).apply {
+            // Real byte-backed progress only; unknown totals show the honest state name.
+            val percent = (progress.progress.coerceIn(0f, 1f) * 100f).toInt()
+            val percentLabel = if (progress.totalBytes > 0L) "$percent%" else progress.state.name.lowercase().replaceFirstChar { it.uppercase() }
+            card.addView(label(percentLabel, 11, purple, true))
+            card.addView(vGap(6))
+            val track = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
                 background = GradientDrawable().apply {
                     setColor(Color.argb(40, 124, 92, 252))
                     cornerRadius = dp(99).toFloat()
                 }
                 layoutParams = LinearLayout.LayoutParams(MP, dp(8))
             }
-            val fillWidth = ((progress.progress.coerceIn(0f, 1f) * 100f).toInt().coerceIn(0, 100) * resources.displayMetrics.density).toInt()
+            val fillWeight = (progress.progress.coerceIn(0f, 1f) * 100f).coerceIn(0f, 100f)
             val fill = View(this).apply {
                 background = GradientDrawable().apply {
                     setColor(purple)
                     cornerRadius = dp(99).toFloat()
                 }
-                layoutParams = LinearLayout.LayoutParams(fillWidth.coerceAtLeast(0), dp(8))
+                layoutParams = LinearLayout.LayoutParams(0, dp(8), fillWeight.coerceAtLeast(0.5f))
             }
-            val wrapper = FrameLayout(this).apply { layoutParams = LinearLayout.LayoutParams(MP, dp(8)) }
-            wrapper.addView(bar)
-            wrapper.addView(fill)
-            card.addView(wrapper)
+            val remainder = View(this).apply {
+                layoutParams = LinearLayout.LayoutParams(0, dp(8), (100f - fillWeight).coerceAtLeast(0.5f))
+            }
+            track.addView(fill)
+            track.addView(remainder)
+            card.addView(track)
             card.addView(vGap(8))
             val bytesText = if (progress.totalBytes > 0L) {
                 "${progress.downloadedBytes / 1024L} KB / ${progress.totalBytes / 1024L} KB"
+            } else if (progress.downloadedBytes > 0L) {
+                "${progress.downloadedBytes / 1024L} KB downloaded"
             } else {
-                progress.state.name
+                progress.state.name.lowercase().replaceFirstChar { it.uppercase() }
             }
             card.addView(label(bytesText, 11, textSecondary, false))
             card.addView(vGap(6))
@@ -2515,16 +2560,27 @@ class MainActivity : Activity() {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
             }
-            val speed = label(if (progress.speedBytesPerSecond > 0f) "${progress.speedBytesPerSecond / 1024f} KB/s" else "Queued", 11, textMuted, false)
-            footer.addView(speed)
+            val statusText = when {
+                progress.speedBytesPerSecond > 0f -> {
+                    val speed = "${String.format("%.1f", progress.speedBytesPerSecond / 1024f)} KB/s"
+                    if (progress.etaSeconds > 0L) "$speed • ETA ${progress.etaSeconds}s" else speed
+                }
+                progress.state == DownloadState.QUEUED -> "Queued"
+                progress.state == DownloadState.RESOLVING -> "Resolving source"
+                progress.state == DownloadState.PROCESSING -> "Processing audio"
+                progress.state == DownloadState.VERIFYING -> "Verifying file"
+                else -> "Downloading"
+            }
+            footer.addView(label(statusText, 11, textMuted, false))
             footer.addView(spacerH())
-            val action = label(if (progress.state == DownloadState.DOWNLOADING) "Cancel" else "Cancel", 11, purple, true).apply {
+            // DownloadManager supports cancellation for in-flight jobs; it has
+            // no pause API, so Cancel is the only honest in-flight action.
+            footer.addView(label("Cancel", 11, purple, true).apply {
                 isClickable = true
                 isFocusable = true
                 foreground = ripple()
                 setOnClickListener { downloadManager.cancel(progress.jobId) }
-            }
-            footer.addView(action)
+            })
             card.addView(footer)
         } else {
             val footer = LinearLayout(this).apply {
@@ -2533,10 +2589,10 @@ class MainActivity : Activity() {
             }
             val sub = label(
                 when (progress.state) {
-                    DownloadState.COMPLETED -> "Completed"
+                    DownloadState.COMPLETED -> "Completed • tap to play"
                     DownloadState.FAILED -> progress.error ?: "Transfer failed"
                     DownloadState.CANCELLED -> "Cancelled"
-                    DownloadState.PAUSED -> "Paused"
+                    DownloadState.PAUSED -> progress.error ?: "Paused"
                     else -> "Ready"
                 },
                 11,
@@ -2545,8 +2601,19 @@ class MainActivity : Activity() {
             )
             footer.addView(sub)
             footer.addView(spacerH())
-            if (progress.state != DownloadState.COMPLETED) {
-                footer.addView(label("Retry", 11, purple, true).apply {
+            if (progress.state == DownloadState.COMPLETED) {
+                footer.addView(label("Play", 11, purple, true).apply {
+                    isClickable = true
+                    isFocusable = true
+                    foreground = ripple()
+                    setOnClickListener { playCompletedDownload(progress) }
+                })
+                footer.addView(hGap(14))
+            } else {
+                // Failed / cancelled / interrupted-paused jobs resume by
+                // re-queueing through the same DownloadManager pipeline.
+                val retryLabel = if (progress.state == DownloadState.PAUSED) "Resume" else "Retry"
+                footer.addView(label(retryLabel, 11, purple, true).apply {
                     isClickable = true
                     isFocusable = true
                     foreground = ripple()
@@ -2568,6 +2635,29 @@ class MainActivity : Activity() {
         }
 
         return card
+    }
+
+    /** Matches a finished job to its indexed library track (in-memory only, no DB on main). */
+    private fun findLibraryTrackForDownload(progress: DownloadProgress): Track? {
+        val file = progress.currentFile
+        if (!file.isNullOrBlank()) {
+            allTracks.firstOrNull { it.uri.toString() == android.net.Uri.fromFile(java.io.File(file)).toString() }
+                ?.let { return it }
+        }
+        return allTracks.firstOrNull {
+            it.title.equals(progress.title, ignoreCase = true) &&
+                (progress.artist.isBlank() || it.artist.equals(progress.artist, ignoreCase = true))
+        }
+    }
+
+    /** Plays a completed download through the existing PlaybackService queue. */
+    private fun playCompletedDownload(progress: DownloadProgress) {
+        val track = findLibraryTrackForDownload(progress)
+        if (track == null) {
+            Toast.makeText(this, "Track is being added to your library — try again in a moment.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        triggerPlay(track)
     }
 
     private fun retryDownload(progress: DownloadProgress) {

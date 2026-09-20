@@ -478,13 +478,17 @@ class MainActivity : Activity() {
     private fun loadLibrary() {
         showLoadingState()
         Thread {
-            val mediaTracks = MusicScanner.scan(this)
-            // Keep the library table in sync so source-backed search (LocalSource)
-            // can see device tracks, not just Aurora-imported ones.
-            runCatching { libraryRepository.syncMediaStoreTracks(mediaTracks) }
-            val importedTracks = libraryRepository.getAuroraTracks()
-            val merged = (mediaTracks + importedTracks).distinctBy { it.uri.toString() + it.id }
-            runOnUiThread { onTracksLoaded(merged) }
+            try {
+                val mediaTracks = MusicScanner.scan(this)
+                // Keep the library table in sync so source-backed search (LocalSource)
+                // can see device tracks, not just Aurora-imported ones.
+                runCatching { libraryRepository.syncMediaStoreTracks(mediaTracks) }
+                val importedTracks = libraryRepository.getAuroraTracks()
+                val merged = (mediaTracks + importedTracks).distinctBy { it.uri.toString() + it.id }
+                runOnUiThread { onTracksLoaded(merged) }
+            } catch (e: Exception) {
+                runOnUiThread { showLibraryError(e.message ?: "Could not load your library.") }
+            }
         }.start()
     }
 
@@ -508,6 +512,13 @@ class MainActivity : Activity() {
     private fun showEmptyState() {
         libraryContainer?.removeAllViews()
         libraryContainer?.addView(buildStateCard("No tracks found", "No local audio was detected.", false))
+    }
+
+    private fun showLibraryError(message: String) {
+        libraryContainer?.removeAllViews()
+        libraryContainer?.addView(
+            buildActionCard("Could not load library", message, "Retry") { loadLibrary() }
+        )
     }
 
     private fun showPermissionRequest() {
@@ -2057,6 +2068,26 @@ class MainActivity : Activity() {
             TrackFilter.ONLINE -> allTracks.filter { trackBucket(it) == TrackFilter.ONLINE }
         }
         if (visible.isEmpty()) {
+            if (trackFilter == TrackFilter.DOWNLOADED) {
+                container.addView(
+                    buildActionCard(
+                        "No downloaded tracks",
+                        "Tracks you import or download into Aurora appear here.",
+                        "Open Downloads"
+                    ) { showDownloadsScreen() }
+                )
+                return
+            }
+            if (trackFilter == TrackFilter.ALL) {
+                container.addView(
+                    buildActionCard(
+                        "No tracks",
+                        "Add music to your device or import files into Aurora.",
+                        "Import Music"
+                    ) { openImportPicker() }
+                )
+                return
+            }
             val (title, message) = when (trackFilter) {
                 TrackFilter.ALL -> "No tracks" to "Add music to your device or import files into Aurora."
                 TrackFilter.LOCAL -> "No local tracks" to "Audio already stored on this device appears here."
@@ -2162,9 +2193,11 @@ class MainActivity : Activity() {
     private fun showLibraryDrillDown(title: String, tracks: List<Track>) {
         val container = libraryContainer ?: return
         activeDownloadView = false
+        trackFilterRow?.visibility = View.GONE
         container.removeAllViews()
         val word = if (tracks.size == 1) "track" else "tracks"
-        container.addView(buildSettingRow("‹  $title", "$word • tap a track to play", "Back") { renderLibrarySection() })
+        val trackWordCount = "${tracks.size} $word • tap a track to play"
+        container.addView(buildSettingRow("‹  $title", trackWordCount, "Back") { renderLibrarySection() })
         container.addView(vGap(4))
         tracks.forEachIndexed { i, track ->
             container.addView(buildTrackRow(track, i + 1, true))
@@ -2338,7 +2371,10 @@ class MainActivity : Activity() {
 
     private fun showDownloadsScreen() {
         activeDownloadView = true
+        trackFilterRow?.visibility = View.GONE
         libraryContainer?.removeAllViews()
+        libraryContainer?.addView(buildSettingRow("‹  Downloads", "Transfer queue and progress", "Back") { renderLibrarySection() })
+        libraryContainer?.addView(vGap(4))
         val list = downloadManager.getAll().sortedByDescending { it.state.ordinal }
         val sections = listOf(
             DownloadState.DOWNLOADING,
@@ -2715,18 +2751,38 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, WC, 1f)
         }
-        meta.addView(label(track.title, 14, text, true).apply {
+        meta.addView(label(track.title.ifBlank { "Unknown track" }, 14, text, true).apply {
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         })
         meta.addView(vGap(2))
-        meta.addView(label("${track.artist} • ${track.album}", 12, textSecondary, false).apply {
+        val artistAlbum = buildString {
+            append(track.artist.ifBlank { "Unknown artist" })
+            if (track.album.isNotBlank()) append(" • ").append(track.album)
+        }
+        meta.addView(label(artistAlbum, 12, textSecondary, false).apply {
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         })
         if (source == "SoundCloud") {
             meta.addView(vGap(2))
             meta.addView(label("Remote • $source", 11, lightPurple, false))
+        } else {
+            // Library rows: honest duration + source bucket (Local / Downloaded / Online).
+            val bucket = trackBucket(track)
+            val bucketLabel = when (bucket) {
+                TrackFilter.LOCAL -> "Local"
+                TrackFilter.DOWNLOADED -> "Downloaded"
+                TrackFilter.ONLINE -> "Online"
+                TrackFilter.ALL -> "Local"
+            }
+            val bucketColor = when (bucket) {
+                TrackFilter.DOWNLOADED -> Color.rgb(120, 220, 160)
+                TrackFilter.ONLINE -> lightPurple
+                else -> textMuted
+            }
+            meta.addView(vGap(2))
+            meta.addView(label(bucketLabel, 11, bucketColor, false))
         }
         row.addView(meta)
         row.addView(label(track.durationLabel, 12, textMuted, false).apply {
@@ -2764,7 +2820,10 @@ class MainActivity : Activity() {
             isClickable = true
             isFocusable = true
             foreground = ripple()
-            setOnClickListener { toggleFavorite(track) }
+            setOnClickListener {
+                toggleFavorite(track)
+                imageTintList = ColorStateList.valueOf(if (favoriteTrackIds.contains(track.id)) purple else textMuted)
+            }
             contentDescription = "Favorite track"
         }
         actions.addView(heart)

@@ -313,11 +313,36 @@ class MainActivity : Activity() {
         val state = data.getQueryParameter("state")
         Thread {
             val result = soundCloudSource.exchangeAuthorizationCode(code, state)
+            if (result.success) {
+                // Mirror the account's SoundCloud likes into the local
+                // favorite cache so hearts render correctly (local set stays
+                // the cache; SoundCloud stays the source of truth for likes).
+                mirrorSoundCloudLikes()
+            }
             runOnUiThread {
                 Toast.makeText(this, result.message, Toast.LENGTH_LONG).show()
                 refreshSoundCloudSettings()
             }
         }.start()
+    }
+
+    /**
+     * Best-effort mirror of the signed-in account's SoundCloud likes into the
+     * local favorite set for UI/cache. Unknown (null) means offline or auth
+     * failure and is left alone honestly — never treated as "no likes".
+     * Runs network I/O; call off the main thread.
+     */
+    private fun mirrorSoundCloudLikes() {
+        val liked = try {
+            soundCloudSource.getLikedTrackIds()
+        } catch (_: Exception) {
+            null
+        } ?: return
+        if (liked.isEmpty()) return
+        val ids = liked.map { stableTrackId(soundCloudSource.sourceId, it) }
+        runOnUiThread {
+            if (favoriteTrackIds.addAll(ids)) persistState()
+        }
     }
 
     /** Opens the official SoundCloud consent page (authorization code + PKCE). */
@@ -1749,7 +1774,7 @@ class MainActivity : Activity() {
             foreground = ripple()
             contentDescription = "Favorite"
             setOnClickListener {
-                toggleFavorite(result.track)
+                toggleSoundCloudFavorite(result)
                 imageTintList = ColorStateList.valueOf(if (favoriteTrackIds.contains(result.track.id)) purple else textMuted)
             }
         }
@@ -2266,13 +2291,14 @@ class MainActivity : Activity() {
         val configured = soundCloudSource.isConfigured()
         val signedIn = soundCloudSource.isSignedIn()
         if (signedIn) {
-            group.addView(buildSettingRow("Connected to SoundCloud", "A user session is active", "Connected"))
+            val accountName = soundCloudSource.signedInAccountName()
+            group.addView(buildSettingRow(
+                "Connected to SoundCloud",
+                accountName?.let { "Signed in as $it" } ?: "A user session is active",
+                "Connected"
+            ))
             group.addView(vGap(10))
-            group.addView(buildPrimaryButton("Disconnect") {
-                soundCloudSource.clearAuthentication()
-                Toast.makeText(this@MainActivity, "Disconnected from SoundCloud", Toast.LENGTH_SHORT).show()
-                refreshSoundCloudSettings()
-            })
+            group.addView(buildPrimaryButton("Disconnect") { disconnectSoundCloud() })
         } else {
             group.addView(buildPrimaryButton("Connect SoundCloud") { startSoundCloudConnect() })
             if (!configured) {
@@ -2310,8 +2336,10 @@ class MainActivity : Activity() {
             true
         ))
         card.addView(vGap(4))
+        val accountName = if (signedIn) soundCloudSource.signedInAccountName() else null
         card.addView(label(
             when {
+                accountName != null -> "Signed in as $accountName — qualified tracks stream with your account."
                 signedIn -> "A user session is active — qualified tracks stream with your account."
                 configured -> "Press Connect to sign in on the official SoundCloud page."
                 else -> "No SoundCloud app credentials are bundled, so online search and discovery are offline."
@@ -2330,6 +2358,32 @@ class MainActivity : Activity() {
         parent.removeView(group)
         soundCloudSettingsGroup = buildSoundCloudSettingsGroup()
         parent.addView(soundCloudSettingsGroup, index)
+    }
+
+    /**
+     * Disconnects the SoundCloud account: revokes app access through the
+     * official POST /disconnect endpoint when the token supports it, then
+     * always clears local credentials. Local Aurora music, downloads, and
+     * the library are never affected.
+     */
+    private fun disconnectSoundCloud() {
+        Thread {
+            val revoked = try {
+                soundCloudSource.disconnectRemote()
+            } catch (_: Exception) {
+                false
+            }
+            soundCloudSource.clearAuthentication()
+            runOnUiThread {
+                Toast.makeText(
+                    this,
+                    if (revoked) "Disconnected from SoundCloud"
+                    else "Disconnected locally — remote revoke was not supported for this session",
+                    Toast.LENGTH_LONG
+                ).show()
+                refreshSoundCloudSettings()
+            }
+        }.start()
     }
 
     private fun buildLocalSummaryCard(): LinearLayout {
@@ -2930,6 +2984,35 @@ class MainActivity : Activity() {
             heroFavBtn?.imageTintList = ColorStateList.valueOf(if (favoriteTrackIds.contains(track.id)) purple else textMuted)
         }
         if (selectedTab == 0) populateAllViews(allTracks)
+    }
+
+    /**
+     * Favorite toggle for a SoundCloud search/discovery hit: keeps the local
+     * mirror immediately (UI/cache) and syncs the like/unlike with SoundCloud
+     * on a background thread when signed in. A remote failure keeps the local
+     * mirror and says so honestly — never pretending it synced.
+     */
+    private fun toggleSoundCloudFavorite(result: SearchResult) {
+        toggleFavorite(result.track)
+        if (result.metadata.trackId.source != soundCloudSource.sourceId) return
+        if (!soundCloudSource.isSignedIn()) return
+        val liked = favoriteTrackIds.contains(result.track.id)
+        Thread {
+            val outcome = try {
+                soundCloudSource.setTrackLiked(result.metadata, liked)
+            } catch (e: Exception) {
+                com.aurora.app.source.LikeResult(success = false, liked = liked, message = e.message ?: "SoundCloud like failed")
+            }
+            runOnUiThread {
+                if (!outcome.success) {
+                    Toast.makeText(
+                        this,
+                        outcome.message.ifBlank { "SoundCloud sync failed — kept locally" },
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }.start()
     }
 
     private fun buildMiniPlayer(): LinearLayout {

@@ -4,6 +4,39 @@ plugins {
     id("org.jetbrains.kotlin.kapt")
 }
 
+import java.util.Properties
+
+// ── SoundCloud app credentials (local development builds) ─────────────────
+// Credentials are supplied OUTSIDE the source tree and are never committed
+// to Git. Resolution order (first non-blank wins):
+//   1. android/soundcloud.properties  (git-ignored) with keys:
+//        SOUNDCLOUD_CLIENT_ID=...
+//        SOUNDCLOUD_CLIENT_SECRET=...
+//   2. environment variables SOUNDCLOUD_CLIENT_ID / SOUNDCLOUD_CLIENT_SECRET
+//   3. Gradle properties -PSOUNDCLOUD_CLIENT_ID=… / -PSOUNDCLOUD_CLIENT_SECRET=…
+// When absent the values stay empty and the build still succeeds; the app
+// then honestly reports "SoundCloud is unavailable in this build".
+// Credential values are never printed anywhere in the build output.
+val soundCloudProperties = Properties().apply {
+    val file = rootProject.file("soundcloud.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
+}
+
+fun soundCloudCredential(propKey: String, envKey: String): String =
+    (
+        soundCloudProperties.getProperty(propKey)
+            ?: System.getenv(envKey)
+            ?: project.findProperty(propKey)?.toString()
+        ).orEmpty().trim()
+
+fun gradleStringLiteral(value: String): String =
+    "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+val soundCloudClientId = soundCloudCredential("SOUNDCLOUD_CLIENT_ID", "SOUNDCLOUD_CLIENT_ID")
+val soundCloudClientSecret = soundCloudCredential("SOUNDCLOUD_CLIENT_SECRET", "SOUNDCLOUD_CLIENT_SECRET")
+val soundCloudRedirectUri = soundCloudCredential("redirectUri", "SOUNDCLOUD_REDIRECT_URI")
+    .ifBlank { "aurora://soundcloud/callback" }
+
 android {
     namespace = "com.aurora.app"
     compileSdk = 35
@@ -27,15 +60,15 @@ android {
 
     buildTypes {
         debug {
-            buildConfigField("String", "SOUNDCLOUD_CLIENT_ID", "\"\"")
-            buildConfigField("String", "SOUNDCLOUD_CLIENT_SECRET", "\"\"")
-            buildConfigField("String", "SOUNDCLOUD_REDIRECT_URI", "\"aurora://soundcloud/callback\"")
+            buildConfigField("String", "SOUNDCLOUD_CLIENT_ID", gradleStringLiteral(soundCloudClientId))
+            buildConfigField("String", "SOUNDCLOUD_CLIENT_SECRET", gradleStringLiteral(soundCloudClientSecret))
+            buildConfigField("String", "SOUNDCLOUD_REDIRECT_URI", gradleStringLiteral(soundCloudRedirectUri))
         }
         release {
             isMinifyEnabled = false
-            buildConfigField("String", "SOUNDCLOUD_CLIENT_ID", "\"\"")
-            buildConfigField("String", "SOUNDCLOUD_CLIENT_SECRET", "\"\"")
-            buildConfigField("String", "SOUNDCLOUD_REDIRECT_URI", "\"aurora://soundcloud/callback\"")
+            buildConfigField("String", "SOUNDCLOUD_CLIENT_ID", gradleStringLiteral(soundCloudClientId))
+            buildConfigField("String", "SOUNDCLOUD_CLIENT_SECRET", gradleStringLiteral(soundCloudClientSecret))
+            buildConfigField("String", "SOUNDCLOUD_REDIRECT_URI", gradleStringLiteral(soundCloudRedirectUri))
         }
     }
 

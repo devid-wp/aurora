@@ -128,12 +128,12 @@ in this build" and online search stays offline — exactly what the
    `aurora://soundcloud/callback`
 2. Copy your credentials into the git-ignored file `android/soundcloud.properties`:
    ```properties
-   clientId=<your client id>
-   clientSecret=<your client secret>
-   redirectUri=aurora://soundcloud/callback
+   SOUNDCLOUD_CLIENT_ID=<your client id>
+   SOUNDCLOUD_CLIENT_SECRET=<your client secret>
    ```
    (Environment variables `SOUNDCLOUD_CLIENT_ID` / `SOUNDCLOUD_CLIENT_SECRET`
-   or Gradle properties work as alternatives; see `android/app/build.gradle.kts`.)
+   or Gradle properties work as alternatives; see `android/app/build.gradle.kts`.
+   The redirect URI defaults to `aurora://soundcloud/callback`.)
 3. Rebuild and reinstall:
    ```sh
    cd android && ./gradlew :app:assembleDebug

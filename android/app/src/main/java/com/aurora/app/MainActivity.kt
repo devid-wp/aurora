@@ -134,10 +134,10 @@ class MainActivity : Activity() {
     private var queueOverlay: FrameLayout? = null
     private var soundCloudSettingsGroup: LinearLayout? = null
     private var isFullPlayerOpen = false
-    private var homeTracksContainer: LinearLayout? = null
     private var recentsRow: LinearLayout? = null
-    private var forYouRow: LinearLayout? = null
-    private var recentsSection: LinearLayout? = null
+    private var quickGrid: LinearLayout? = null
+    private var discoverCtaSubtitle: TextView? = null
+    private var homeLibraryRow: LinearLayout? = null
     private var libraryContainer: LinearLayout? = null
     private var librarySection = LibrarySection.TRACKS
     private var trackFilter = TrackFilter.ALL
@@ -501,30 +501,22 @@ class MainActivity : Activity() {
     }
 
     private fun showLoadingState() {
-        homeTracksContainer?.removeAllViews()
         libraryContainer?.removeAllViews()
-        homeTracksContainer?.addView(buildStateCard("Scanning music library...", "Locating local tracks and artwork", true))
         libraryContainer?.addView(buildStateCard("Scanning music library...", "Locating local tracks and artwork", true))
     }
 
     private fun showEmptyState() {
-        homeTracksContainer?.removeAllViews()
         libraryContainer?.removeAllViews()
-        homeTracksContainer?.addView(buildStateCard("Your library is empty", "Add music files to your device to populate Aurora.", false))
         libraryContainer?.addView(buildStateCard("No tracks found", "No local audio was detected.", false))
     }
 
     private fun showPermissionRequest() {
-        homeTracksContainer?.removeAllViews()
         libraryContainer?.removeAllViews()
-        homeTracksContainer?.addView(buildActionCard("Access your local music", "Aurora needs storage access to scan and play your tracks.", "Grant access") { requestAudioPermission() })
         libraryContainer?.addView(buildActionCard("Access your local music", "Aurora needs storage access to scan and play your tracks.", "Grant access") { requestAudioPermission() })
     }
 
     private fun showPermissionDenied() {
-        homeTracksContainer?.removeAllViews()
         libraryContainer?.removeAllViews()
-        homeTracksContainer?.addView(buildActionCard("Permission required", "Aurora cannot index your library without audio access.", "Try again") { requestAudioPermission() })
         libraryContainer?.addView(buildActionCard("Permission required", "Aurora cannot index your library without audio access.", "Try again") { requestAudioPermission() })
     }
 
@@ -570,7 +562,10 @@ class MainActivity : Activity() {
         contentContainer?.addView(view, FrameLayout.LayoutParams(MP, MP))
         view.animate().alpha(1f).setDuration(180).start()
         updateNavSelection()
-        if (tabIndex == 0) refreshHero()
+        if (tabIndex == 0) {
+            refreshHero()
+            refreshHomeSections()
+        }
         if (tabIndex == 3 && libraryNeedsRefresh) {
             libraryNeedsRefresh = false
             loadLibrary()
@@ -648,30 +643,12 @@ class MainActivity : Activity() {
         }
 
         page.addView(buildHomeHeader())
-        page.addView(buildMixRow())
         page.addView(buildHeroSection())
-        page.addView(buildSectionHeader("Recently Played", true) { showTab(3) })
-        val recentWrap = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            setPadding(dp(24), 0, dp(24), 0)
-            clipToPadding = false
-        }
-        recentsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        recentWrap.addView(recentsRow)
-        page.addView(recentWrap)
-        page.addView(vGap(20))
-        page.addView(buildSectionHeader("For You", true) { showTab(1) })
-        val forYouWrap = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            setPadding(dp(24), 0, dp(24), 0)
-            clipToPadding = false
-        }
-        forYouRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        forYouWrap.addView(forYouRow)
-        page.addView(forYouWrap)
-        page.addView(vGap(20))
-
-        homeTracksContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        page.addView(buildQuickAccess())
+        page.addView(buildContinueSection())
+        page.addView(buildDiscoverCta())
+        page.addView(buildHomeLibrary())
+        page.addView(vGap(8))
 
         scroll.addView(page)
         homeScroll = scroll
@@ -692,8 +669,20 @@ class MainActivity : Activity() {
         }
         textCol.addView(label("AURORA", 11, purple, true).apply { letterSpacing = 0.22f })
         textCol.addView(vGap(6))
-        textCol.addView(label("Music for a quieter you", 18, text, true))
+        textCol.addView(label(homeGreeting(), 22, text, true))
+        textCol.addView(vGap(4))
+        textCol.addView(label("Music always feels a little better at night.", 13, textSecondary, false))
 
+        val searchBtn = ImageView(this).apply {
+            setImageResource(R.drawable.ic_nav_search)
+            imageTintList = ColorStateList.valueOf(textSecondary)
+            layoutParams = LinearLayout.LayoutParams(dp(24), dp(24)).also { it.rightMargin = dp(16) }
+            isClickable = true
+            isFocusable = true
+            foreground = ripple()
+            setOnClickListener { showTab(1) }
+            contentDescription = "Search"
+        }
         val settingsBtn = ImageView(this).apply {
             setImageResource(R.drawable.ic_nav_settings)
             imageTintList = ColorStateList.valueOf(textSecondary)
@@ -705,87 +694,251 @@ class MainActivity : Activity() {
             contentDescription = "Settings"
         }
         row.addView(textCol)
+        row.addView(searchBtn)
         row.addView(settingsBtn)
         return row
     }
 
-    private fun buildMixRow(): LinearLayout {
+    private fun homeGreeting(): String {
+        val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+        val part = when (hour) {
+            in 5..11 -> "Good morning"
+            in 12..17 -> "Good afternoon"
+            else -> "Good evening"
+        }
+        return "$part, David."
+    }
+
+    private fun buildQuickAccess(): LinearLayout {
         val section = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(10), dp(24), 0)
+            setPadding(dp(24), 0, dp(24), 0)
         }
-        section.addView(label("Good evening", 24, text, true))
-        section.addView(vGap(12))
+        section.addView(buildSectionHeader("Quick Access", false))
+        val grid = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        quickGrid = grid
+        section.addView(grid)
+        section.addView(vGap(20))
+        refreshQuickAccess()
+        return section
+    }
 
-        val row = HorizontalScrollView(this).apply {
+    private fun refreshQuickAccess() {
+        val grid = quickGrid ?: return
+        grid.removeAllViews()
+        val likedCount = favoriteTrackIds.size
+        val recentCount = recents.size
+        val downloadCount = allTracks.count { trackBucket(it) == TrackFilter.DOWNLOADED }
+        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        top.addView(quickCard(R.drawable.ic_heart, "Liked", songsLabel(likedCount), 1f, 0) {
+            val firstLiked = allTracks.firstOrNull { favoriteTrackIds.contains(it.id) }
+            if (firstLiked != null) triggerPlay(firstLiked) else showTab(3)
+        })
+        top.addView(hGap(10))
+        top.addView(quickCard(R.drawable.ic_waveform, "Recently Played", songsLabel(recentCount), 1f, 0) {
+            val latest = recents.firstOrNull()
+            if (latest != null) triggerPlay(latest) else showTab(3)
+        })
+        val bottom = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(MP, WC).also { it.topMargin = dp(10) }
+        }
+        bottom.addView(quickCard(R.drawable.ic_nav_library, "Downloads", songsLabel(downloadCount), 1f, 0) {
+            showTab(3)
+            showDownloadsScreen()
+        })
+        bottom.addView(hGap(10))
+        bottom.addView(quickCard(R.drawable.ic_nav_discover, "Discover", if (soundCloudSource.isConfigured()) "Fresh picks" else "Not connected", 1f, 0) {
+            showTab(2)
+        })
+        grid.addView(top)
+        grid.addView(bottom)
+    }
+
+    private fun songsLabel(count: Int): String = if (count == 1) "1 song" else "$count songs"
+
+    private fun quickCard(iconRes: Int, title: String, subtitle: String, weight: Float, leftMarginDp: Int, onClick: () -> Unit): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = rounded(surface, 18).apply {
+                setStroke(dp(1), Color.argb(28, 124, 92, 252))
+            }
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            layoutParams = LinearLayout.LayoutParams(0, WC, weight).also { if (leftMarginDp > 0) it.leftMargin = dp(leftMarginDp) }
+            clipToOutline = true
+            outlineProvider = roundRectOutline(18)
+            isClickable = true
+            isFocusable = true
+            foreground = ripple()
+            setOnClickListener { onClick() }
+            addView(ImageView(this@MainActivity).apply {
+                setImageResource(iconRes)
+                imageTintList = ColorStateList.valueOf(purple)
+                layoutParams = LinearLayout.LayoutParams(dp(26), dp(26)).also { it.rightMargin = dp(12) }
+            })
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, WC, 1f)
+                addView(label(title, 14, text, true).apply {
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                })
+                addView(vGap(2))
+                addView(label(subtitle, 11, textSecondary, false).apply {
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                })
+            })
+        }
+    }
+
+    private fun buildContinueSection(): LinearLayout {
+        val section = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        section.addView(buildSectionHeader("Continue Listening", true) { showTab(3) })
+        val wrap = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
+            setPadding(dp(24), 0, dp(24), 0)
             clipToPadding = false
-            setPadding(0, 0, 0, 0)
         }
-        val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        listOf(
-            "Liked Tracks" to intArrayOf(Color.rgb(120, 92, 252), Color.rgb(44, 21, 67), Color.rgb(166, 133, 255)),
-            "Chill Mix" to intArrayOf(Color.rgb(27, 33, 54), Color.rgb(83, 72, 129), Color.rgb(141, 116, 255)),
-            "Hyperfocus" to intArrayOf(Color.rgb(20, 25, 36), Color.rgb(59, 29, 70), Color.rgb(189, 117, 255)),
-            "Night" to intArrayOf(Color.rgb(18, 18, 28), Color.rgb(48, 44, 78), Color.rgb(112, 100, 254))
-        ).forEachIndexed { index, pair ->
-            val title = pair.first
-            val colors = pair.second
-            val sampleTrack = allTracks.getOrNull((index * 2) % maxOf(allTracks.size, 1))
-            val card = FrameLayout(this).apply {
-                background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, colors.sliceArray(0..1)).apply {
-                    cornerRadius = dp(22).toFloat()
-                    setStroke(dp(1), Color.argb(55, 255, 255, 255))
-                }
-                isClickable = true
-                isFocusable = true
-                foreground = ripple()
-                layoutParams = LinearLayout.LayoutParams(0, dp(86), 1f).also {
-                    if (index > 0) it.leftMargin = dp(10)
-                }
-                setOnClickListener {
-                    if (allTracks.isNotEmpty()) triggerPlay(allTracks[(index * 2) % allTracks.size])
-                }
-                clipToOutline = true
-                outlineProvider = roundRectOutline(22)
-                elevation = dp(8).toFloat()
-            }
+        recentsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        wrap.addView(recentsRow)
+        section.addView(wrap)
+        section.addView(vGap(20))
+        updateRecentsUI()
+        return section
+    }
 
-            if (sampleTrack != null) {
-                val art = ImageView(this).apply {
-                    layoutParams = FrameLayout.LayoutParams(MP, MP)
-                    scaleType = ImageView.ScaleType.CENTER_CROP
-                    alpha = 0.6f
-                }
-                ArtworkLoader.loadArtwork(this, sampleTrack, dp(180), art)
-                card.addView(art)
-            }
-
-            val glow = View(this).apply {
-                layoutParams = FrameLayout.LayoutParams(MP, MP)
-                background = GradientDrawable().apply {
-                    setColor(Color.argb(95, 17, 17, 27))
-                    cornerRadius = dp(22).toFloat()
-                }
-            }
-            val labelView = TextView(this).apply {
-                text = title
-                setTextColor(this@MainActivity.text)
-                typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-                textSize = 13f
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(14), 0, dp(12), 0)
-                layoutParams = FrameLayout.LayoutParams(MP, MP)
-            }
-            card.addView(glow)
-            card.addView(labelView)
-            chips.addView(card)
+    private fun buildDiscoverCta(): LinearLayout {
+        val section = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), 0, dp(24), 0)
         }
-
-        row.addView(chips)
-        section.addView(row)
+        section.addView(buildSectionHeader("Discover", true) { showTab(2) })
+        val card = FrameLayout(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                intArrayOf(Color.rgb(88, 58, 180), Color.rgb(22, 18, 36))
+            ).apply {
+                cornerRadius = dp(22).toFloat()
+                setStroke(dp(1), Color.argb(60, 255, 255, 255))
+            }
+            clipToOutline = true
+            outlineProvider = roundRectOutline(22)
+            elevation = dp(8).toFloat()
+            isClickable = true
+            isFocusable = true
+            foreground = ripple()
+            setOnClickListener { showTab(2) }
+        }
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(20), dp(20), dp(20))
+        }
+        col.addView(label("Random Discovery", 18, text, true))
+        col.addView(vGap(6))
+        discoverCtaSubtitle = label(discoverCtaText(), 12, textSecondary, false)
+        col.addView(discoverCtaSubtitle)
+        col.addView(vGap(14))
+        val pill = FrameLayout(this).apply {
+            background = rounded(Color.argb(235, 245, 243, 255), 12)
+            isClickable = true
+            isFocusable = true
+            foreground = ripple()
+            layoutParams = LinearLayout.LayoutParams(WC, dp(40))
+            setOnClickListener { showTab(2) }
+        }
+        pill.addView(label("Open Discover", 13, bg, true).apply {
+            gravity = Gravity.CENTER
+            layoutParams = FrameLayout.LayoutParams(WC, WC).also { it.gravity = Gravity.CENTER }
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+        })
+        col.addView(pill)
+        card.addView(col)
+        section.addView(card)
         section.addView(vGap(20))
         return section
+    }
+
+    private fun discoverCtaText(): String = if (soundCloudSource.isConfigured()) {
+        "A fresh shuffled batch of playable online tracks."
+    } else {
+        "Connect SoundCloud in Settings to unlock online picks."
+    }
+
+    private fun buildHomeLibrary(): LinearLayout {
+        val section = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), 0, dp(24), 0)
+        }
+        section.addView(buildSectionHeader("Your Library", true) { openLibrarySection(LibrarySection.TRACKS) })
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        homeLibraryRow = row
+        section.addView(row)
+        section.addView(vGap(20))
+        refreshHomeLibrary()
+        return section
+    }
+
+    private fun refreshHomeLibrary() {
+        val row = homeLibraryRow ?: return
+        row.removeAllViews()
+        val trackCount = allTracks.size
+        val albumCount = allTracks.map { it.album.trim() }.filter { it.isNotEmpty() }.distinct().size
+        val artistCount = allTracks.map { it.artist.trim() }.filter { it.isNotEmpty() }.distinct().size
+        row.addView(libraryCard("Tracks", songsLabel(trackCount), 1f, 0) { openLibrarySection(LibrarySection.TRACKS) })
+        row.addView(hGap(10))
+        row.addView(libraryCard("Albums", if (albumCount == 1) "1 album" else "$albumCount albums", 1f, 0) { openLibrarySection(LibrarySection.ALBUMS) })
+        row.addView(hGap(10))
+        row.addView(libraryCard("Artists", if (artistCount == 1) "1 artist" else "$artistCount artists", 1f, 0) { openLibrarySection(LibrarySection.ARTISTS) })
+    }
+
+    private fun libraryCard(title: String, subtitle: String, weight: Float, leftMarginDp: Int, onClick: () -> Unit): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(surface, 18).apply {
+                setStroke(dp(1), Color.argb(28, 124, 92, 252))
+            }
+            setPadding(dp(14), dp(16), dp(14), dp(16))
+            layoutParams = LinearLayout.LayoutParams(0, WC, weight).also { if (leftMarginDp > 0) it.leftMargin = dp(leftMarginDp) }
+            clipToOutline = true
+            outlineProvider = roundRectOutline(18)
+            isClickable = true
+            isFocusable = true
+            foreground = ripple()
+            setOnClickListener { onClick() }
+            addView(label(title, 14, text, true).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            })
+            addView(vGap(4))
+            addView(label(subtitle, 11, textSecondary, false).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            })
+        }
+    }
+
+    private fun openLibrarySection(section: LibrarySection) {
+        librarySection = section
+        if (libraryView != null) {
+            updateSegmentedSelection(librarySectionTabs, section.ordinal)
+            renderLibrarySection()
+        }
+        showTab(3)
+    }
+
+    private fun refreshHomeSections() {
+        refreshQuickAccess()
+        updateRecentsUI()
+        discoverCtaSubtitle?.text = discoverCtaText()
+        refreshHomeLibrary()
     }
 
     private fun buildHeroSection(): LinearLayout {
@@ -1789,7 +1942,7 @@ class MainActivity : Activity() {
         page.addView(buildSettingRow("Downloads", "Transfer queue and progress", "↗") { showDownloadsScreen() })
         page.addView(vGap(12))
 
-        page.addView(buildSegmentedRow(listOf("Tracks", "Albums", "Artists"), 0, librarySectionTabs) { switchLibrarySection(it) })
+        page.addView(buildSegmentedRow(listOf("Tracks", "Albums", "Artists"), librarySection.ordinal, librarySectionTabs) { switchLibrarySection(it) })
         page.addView(vGap(8))
         trackFilterRow = buildSegmentedRow(listOf("All", "Local", "Downloaded", "Online"), 0, trackFilterTabs) { switchTrackFilter(it) }
         page.addView(trackFilterRow!!)
@@ -2444,14 +2597,7 @@ class MainActivity : Activity() {
     }
 
     private fun populateAllViews(tracks: List<Track>) {
-        updateRecentsUI()
-        if (homeTracksContainer != null) {
-            homeTracksContainer?.removeAllViews()
-            tracks.take(6).forEachIndexed { i, track ->
-                homeTracksContainer?.addView(buildTrackRow(track, i + 1, false))
-                if (i < tracks.take(6).lastIndex) homeTracksContainer?.addView(dividerRow())
-            }
-        }
+        refreshHomeSections()
         if (libraryContainer != null && tracks.isNotEmpty()) {
             renderLibrarySection()
         }
@@ -2461,31 +2607,12 @@ class MainActivity : Activity() {
         val row = recentsRow ?: return
         row.removeAllViews()
         if (recents.isEmpty()) {
-            val fallback = if (allTracks.isNotEmpty()) allTracks.take(3) else listOf(Track(0, "No recent tracks", "Play a song", "", 0L, android.net.Uri.EMPTY, 0L))
-            fallback.forEachIndexed { idx, track ->
-                val card = buildAlbumCard(track, idx == 0)
-                row.addView(card)
-                if (idx < fallback.lastIndex) row.addView(hGap(12))
-            }
-            populateForYouUI()
+            row.addView(buildStateCard("No recent tracks yet", "Play something and it will show up here.", false))
             return
         }
-        recents.forEachIndexed { idx, track ->
-            val card = buildAlbumCard(track, idx == 0)
-            row.addView(card)
-            if (idx < recents.lastIndex) row.addView(hGap(12))
-        }
-        populateForYouUI()
-    }
-
-    private fun populateForYouUI() {
-        val row = forYouRow ?: return
-        row.removeAllViews()
-        val tracks = if (allTracks.isNotEmpty()) allTracks.take(5) else listOf(Track(0, "For you", "Curated mixes", "", 0L, android.net.Uri.EMPTY, 0L))
-        tracks.forEachIndexed { idx, track ->
-            val card = buildAlbumCard(track, idx == 0)
-            row.addView(card)
-            if (idx < tracks.lastIndex) row.addView(hGap(12))
+        recents.take(8).forEachIndexed { idx, track ->
+            row.addView(buildAlbumCard(track, idx == 0))
+            if (idx < recents.take(8).lastIndex) row.addView(hGap(12))
         }
     }
 

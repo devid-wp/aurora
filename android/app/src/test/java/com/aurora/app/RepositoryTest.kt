@@ -52,4 +52,29 @@ class RepositoryTest {
         historyRepository.recordPlay(20L, 5000L)
         assertEquals(1, historyRepository.getRecent(10).size)
     }
+
+    @Test
+    fun phone_music_rows_are_preserved_but_never_surfaced_as_aurora() {
+        val tracks = listOf(
+            Track(
+                id = 30L,
+                title = "Phone Song",
+                artist = "Phone Artist",
+                album = "Phone Album",
+                duration = 100000L,
+                uri = android.net.Uri.parse("content://audio/phone/30"),
+                albumId = 1L
+            )
+        )
+
+        libraryRepository.syncMediaStoreTracks(tracks)
+
+        // Existing device rows are preserved (never deleted) ...
+        assertEquals(1, libraryRepository.getAllTracks().size)
+        // ... but Aurora never surfaces phone music as its own library.
+        assertTrue(libraryRepository.getAuroraTracks().isEmpty())
+        assertTrue(libraryRepository.getAuroraTrackEntities().isEmpty())
+        assertTrue(libraryRepository.getAuroraArtists().isEmpty())
+        assertTrue(libraryRepository.getAuroraAlbums().isEmpty())
+    }
 }

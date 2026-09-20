@@ -1,13 +1,11 @@
 package com.aurora.app
 
-import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
-import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Outline
@@ -113,6 +111,8 @@ class MainActivity : Activity() {
     private val soundCloudSource by lazy { SoundCloudSource(applicationContext) }
     private val localSource by lazy { LocalSource(libraryRepository, context = applicationContext) }
     private var allTracks: List<Track> = emptyList()
+    /** Track ids with a verified completed Aurora download (drives the Downloaded bucket). */
+    private var downloadedTrackIds: Set<Long> = emptySet()
     private var activeDownloadView = false
     private var libraryNeedsRefresh = false
     private var currentSearchSource = "local"
@@ -197,7 +197,6 @@ class MainActivity : Activity() {
     private var userSeeking = false
 
     private companion object {
-        const val RC_PERM = 42
         const val RC_IMPORT_MUSIC = 43
         const val DISCOVERY_SEEN_KEY = "discovery_seen"
     }
@@ -382,16 +381,6 @@ class MainActivity : Activity() {
     }
 
     @Deprecated("Deprecated in Java")
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == RC_PERM && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-            loadLibrary()
-        } else {
-            showPermissionDenied()
-        }
-    }
-
-    @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != RC_IMPORT_MUSIC) return
@@ -442,21 +431,9 @@ class MainActivity : Activity() {
     }
 
     private fun checkAndLoad() {
-        if (hasAudioPermission()) {
-            loadLibrary()
-        } else {
-            showPermissionRequest()
-        }
-    }
-
-    private fun hasAudioPermission(): Boolean {
-        val perm = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
-        return checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun requestAudioPermission() {
-        val perm = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
-        requestPermissions(arrayOf(perm), RC_PERM)
+        // Aurora owns its library (explicit imports + explicit downloads), so
+        // no device-wide audio permission is needed to load it.
+        loadLibrary()
     }
 
     private fun openImportPicker() {
@@ -504,13 +481,14 @@ class MainActivity : Activity() {
         showLoadingState()
         Thread {
             try {
-                val mediaTracks = MusicScanner.scan(this)
-                // Keep the library table in sync so source-backed search (LocalSource)
-                // can see device tracks, not just Aurora-imported ones.
-                runCatching { libraryRepository.syncMediaStoreTracks(mediaTracks) }
-                val importedTracks = libraryRepository.getAuroraTracks()
-                val merged = (mediaTracks + importedTracks).distinctBy { it.uri.toString() + it.id }
-                runOnUiThread { onTracksLoaded(merged) }
+                // Aurora-owned library only: explicit user imports + explicit
+                // Aurora downloads. Phone music is never auto-adopted.
+                val auroraTracks = libraryRepository.getAuroraTracks()
+                downloadedTrackIds = downloadRepository.getAll()
+                    .filter { it.status == "completed" && it.trackId != null }
+                    .mapNotNull { it.trackId }
+                    .toSet()
+                runOnUiThread { onTracksLoaded(auroraTracks) }
             } catch (e: Exception) {
                 runOnUiThread { showLibraryError(e.message ?: "Could not load your library.") }
             }
@@ -531,12 +509,12 @@ class MainActivity : Activity() {
 
     private fun showLoadingState() {
         libraryContainer?.removeAllViews()
-        libraryContainer?.addView(buildStateCard("Scanning music library...", "Locating local tracks and artwork", true))
+        libraryContainer?.addView(buildStateCard("Loading your Aurora library...", "Reading imported and downloaded tracks", true))
     }
 
     private fun showEmptyState() {
         libraryContainer?.removeAllViews()
-        libraryContainer?.addView(buildStateCard("No tracks found", "No local audio was detected.", false))
+        libraryContainer?.addView(buildStateCard("Your Aurora library is empty", "Import music files or download tracks to start your collection.", false))
     }
 
     private fun showLibraryError(message: String) {
@@ -544,16 +522,6 @@ class MainActivity : Activity() {
         libraryContainer?.addView(
             buildActionCard("Could not load library", message, "Retry") { loadLibrary() }
         )
-    }
-
-    private fun showPermissionRequest() {
-        libraryContainer?.removeAllViews()
-        libraryContainer?.addView(buildActionCard("Access your local music", "Aurora needs storage access to scan and play your tracks.", "Grant access") { requestAudioPermission() })
-    }
-
-    private fun showPermissionDenied() {
-        libraryContainer?.removeAllViews()
-        libraryContainer?.addView(buildActionCard("Permission required", "Aurora cannot index your library without audio access.", "Try again") { requestAudioPermission() })
     }
 
     private fun buildActionCard(title: String, message: String, buttonText: String, onClick: () -> Unit): LinearLayout {
@@ -1895,7 +1863,8 @@ class MainActivity : Activity() {
             if (capability.availability != DownloadAvailability.AVAILABLE) {
                 runOnUiThread {
                     button?.text = "Download"
-                    Toast.makeText(this, capability.reason.ifBlank { "This track is not downloadable." }, Toast.LENGTH_LONG).show()
+                    val reason = capability.reason.ifBlank { "This track is not downloadable." }
+                    Toast.makeText(this, "Download unavailable — $reason", Toast.LENGTH_LONG).show()
                 }
                 return@Thread
             }
@@ -1932,7 +1901,8 @@ class MainActivity : Activity() {
             val capability = soundCloudSource.checkDownloadAvailability(metadata)
             if (capability.availability != DownloadAvailability.AVAILABLE) {
                 runOnUiThread {
-                    Toast.makeText(this, capability.reason.ifBlank { "This track is not officially downloadable from SoundCloud." }, Toast.LENGTH_SHORT).show()
+                    val reason = capability.reason.ifBlank { "This track is not officially downloadable from SoundCloud." }
+                    Toast.makeText(this, "Download unavailable — $reason", Toast.LENGTH_SHORT).show()
                 }
                 return@Thread
             }
@@ -1983,7 +1953,7 @@ class MainActivity : Activity() {
         }
         page.addView(label("Library", 28, text, true))
         page.addView(vGap(8))
-        page.addView(label("Your local collection", 13, textSecondary, false))
+        page.addView(label("Your Aurora collection", 13, textSecondary, false))
         page.addView(vGap(12))
         page.addView(buildLocalSummaryCard())
         page.addView(vGap(12))
@@ -2063,12 +2033,14 @@ class MainActivity : Activity() {
         renderLibrarySection()
     }
 
-    /** Classifies an in-library track into the All / Local / Downloaded / Online buckets. */
+    /** Classifies an Aurora-owned track into the All / Local / Downloaded / Online buckets. */
     private fun trackBucket(track: Track): TrackFilter {
+        // Explicit Aurora downloads (verified local copy) come first so they
+        // stay in Downloaded even though they are also local files.
+        if (downloadedTrackIds.contains(track.id)) return TrackFilter.DOWNLOADED
         return when (track.uri.scheme?.lowercase()) {
-            "file" -> TrackFilter.DOWNLOADED          // files inside Aurora-managed storage (imports + downloads)
             "http", "https" -> TrackFilter.ONLINE     // network source tracks when present
-            else -> TrackFilter.LOCAL                 // device MediaStore tracks
+            else -> TrackFilter.LOCAL                 // explicitly imported Aurora files
         }
     }
 
@@ -2107,15 +2079,15 @@ class MainActivity : Activity() {
                 container.addView(
                     buildActionCard(
                         "No tracks",
-                        "Add music to your device or import files into Aurora.",
+                        "Import music files or download tracks to start your Aurora collection.",
                         "Import Music"
                     ) { openImportPicker() }
                 )
                 return
             }
             val (title, message) = when (trackFilter) {
-                TrackFilter.ALL -> "No tracks" to "Add music to your device or import files into Aurora."
-                TrackFilter.LOCAL -> "No local tracks" to "Audio already stored on this device appears here."
+                TrackFilter.ALL -> "No tracks" to "Import music files or download tracks to start your Aurora collection."
+                TrackFilter.LOCAL -> "No imported tracks" to "Music files you explicitly import into Aurora appear here."
                 TrackFilter.DOWNLOADED -> "No downloaded tracks" to "Tracks you import or download into Aurora appear here."
                 TrackFilter.ONLINE -> "No online tracks" to "SoundCloud tracks saved to your library appear here."
             }
@@ -2260,8 +2232,8 @@ class MainActivity : Activity() {
 
         page.addView(vGap(20))
         page.addView(settingGroupLabel("Library"))
-        page.addView(buildSettingRow("Rescan storage", "Refresh local music indexing", "↻") { loadLibrary() })
-        page.addView(buildSettingRow("Track filter", "Tracks under 30 seconds hidden", "30s"))
+        page.addView(buildSettingRow("Reload library", "Refresh your Aurora collection", "↻") { loadLibrary() })
+        page.addView(buildSettingRow("Duplicate imports", "Already-imported audio is skipped automatically", "Auto"))
 
         page.addView(vGap(20))
         page.addView(settingGroupLabel("SoundCloud"))

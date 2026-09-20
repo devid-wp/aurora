@@ -190,4 +190,50 @@ class DownloadManagerTest {
         assertEquals(DownloadState.PAUSED, restored!!.state)
         assertEquals("Interrupted Track", restored!!.title)
     }
+
+    @Test
+    fun completed_download_resolves_offline_capable_file() {
+        val localDb = AuroraDatabase.inMemory(context)
+        val storage = AuroraStorageManager(context)
+        val manager = DownloadManager(context, localDb, storage)
+        val downloadFile = File(context.cacheDir, "offline-capable.mp3")
+        downloadFile.writeBytes("offline-audio".toByteArray())
+
+        val source = object : MusicSource {
+            override val sourceId: String = "soundcloud"
+            override val capabilities: Set<SourceCapability> = setOf(SourceCapability.DOWNLOAD)
+            override fun search(query: String): List<SourceMetadata> = emptyList()
+            override fun getTrack(id: SourceTrackId): SourceMetadata? = null
+            override fun stream(track: SourceMetadata): StreamResult = StreamResult(uri = null, metadata = track, error = "stub")
+            override fun checkDownloadAvailability(track: SourceMetadata) =
+                com.aurora.app.source.DownloadCapability(DownloadAvailability.AVAILABLE)
+            override fun download(track: SourceMetadata, targetDir: File): DownloadResult =
+                DownloadResult(success = true, localPath = downloadFile.absolutePath)
+        }
+
+        val metadata = SourceMetadata(
+            trackId = SourceTrackId("soundcloud", "remote-offline-1"),
+            title = "Offline Capable",
+            artist = "Remote Artist",
+            album = "Remote Album",
+            durationMs = 240000L,
+            localPath = downloadFile.absolutePath
+        )
+
+        val queued = manager.queue(source, metadata)
+        assertEquals(DownloadState.COMPLETED, awaitTerminal(manager, queued.jobId).state)
+
+        // The verified copy is an Aurora-owned row whose file exists on disk,
+        // so LocalSource resolves it with no network involved (offline play).
+        // (The stored title comes from the downloaded file's own metadata,
+        // so the lookup below is intentionally broad.)
+        val localSource = LocalSource(com.aurora.app.database.repositories.LibraryRepository(localDb))
+        val found = localSource.search("")
+        assertEquals(1, found.size)
+        assertTrue(found.first().title.isNotBlank())
+        val stream = localSource.stream(found.first())
+        assertNotNull("completed download did not resolve a playable file", stream.uri)
+        assertEquals("file", stream.uri!!.scheme)
+        assertTrue(File(stream.uri!!.path!!).exists())
+    }
 }

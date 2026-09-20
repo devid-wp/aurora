@@ -36,7 +36,8 @@ class LocalSource(
 
     override fun search(query: String): List<SourceMetadata> {
         val normalized = query.trim()
-        return libraryRepository.getAllTracks()
+        // Aurora-owned library only: explicit imports + explicit downloads.
+        return libraryRepository.getAuroraTrackEntities()
             .filter { track ->
                 normalized.isEmpty() || track.title.contains(normalized, ignoreCase = true) ||
                     track.artist.contains(normalized, ignoreCase = true) ||

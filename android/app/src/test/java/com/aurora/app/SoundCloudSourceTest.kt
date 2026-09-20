@@ -574,6 +574,22 @@ class SoundCloudSourceTest {
     }
 
     @Test
+    fun preview_only_track_is_not_downloadable() {
+        val client = FakeSoundCloudHttpClient().apply {
+            tokenHandler = standardTokenHandler()
+            textResponses["/tracks"] = SoundCloudResponse(200, body = collectionSearch(previewTrackJson()))
+        }
+        val source = configuredSource(client)
+
+        val metadata = source.search("snippet").first()
+        val capability = source.checkDownloadAvailability(metadata)
+
+        // A remote-only preview must never be treated as downloaded or downloadable.
+        assertEquals(com.aurora.app.source.DownloadAvailability.PREVIEW_ONLY, capability.availability)
+        assertFalse(metadata.sourceCapabilities.contains(SourceCapability.DOWNLOAD))
+    }
+
+    @Test
     fun like_401_refreshes_session_once_then_retries() {
         val client = FakeSoundCloudHttpClient()
         var likeAttempts = 0

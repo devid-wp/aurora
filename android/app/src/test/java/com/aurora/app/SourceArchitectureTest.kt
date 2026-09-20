@@ -115,4 +115,29 @@ class SourceArchitectureTest {
         assertTrue(libraryRepository.getAuroraArtists().contains("Demo Artist"))
         assertTrue(libraryRepository.getAuroraAlbums().contains("Demo Album"))
     }
+
+    @Test
+    fun local_search_ignores_non_aurora_rows() {
+        database.trackDao().upsert(
+            TrackEntity(
+                id = 202L,
+                title = "Phone Music Song",
+                artist = "Phone Artist",
+                album = "Phone Album",
+                durationMs = 180000L,
+                uri = Uri.parse("content://audio/phone/202").toString(),
+                mediaStoreId = 202L,
+                sourceType = "media_store",
+                isAuroraImported = false
+            )
+        )
+
+        val source = LocalSource(libraryRepository)
+        val results = source.search("")
+
+        // The legacy device row is preserved in the database but invisible.
+        assertEquals(2, libraryRepository.getAllTracks().size)
+        assertEquals(1, results.size)
+        assertEquals("Demo Track", results.first().title)
+    }
 }

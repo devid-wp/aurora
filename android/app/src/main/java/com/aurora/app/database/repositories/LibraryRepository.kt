@@ -60,8 +60,15 @@ class LibraryRepository(private val database: AuroraDatabase) {
 
     fun getAllTracks(): List<TrackEntity> = trackDao.getAll()
 
-    fun getAuroraTracks(): List<Track> = trackDao.getAll()
+    /**
+     * Aurora-owned tracks only: explicitly imported files and explicitly
+     * downloaded tracks. Legacy device-wide rows (if any) are never surfaced
+     * here — Aurora does not automatically adopt phone music.
+     */
+    fun getAuroraTrackEntities(): List<TrackEntity> = trackDao.getAll()
         .filter { it.isAuroraImported || it.sourceType == "aurora_imported" }
+
+    fun getAuroraTracks(): List<Track> = getAuroraTrackEntities()
         .map { it.toTrack() }
 
     fun getDownloadedTracks(): List<Track> = getAuroraTracks()

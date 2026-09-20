@@ -46,6 +46,7 @@ import com.aurora.app.import.ImportResult
 import com.aurora.app.import.ImportStatus
 import com.aurora.app.import.MusicImportManager
 import com.aurora.app.source.DownloadAvailability
+import com.aurora.app.source.AudiusSource
 import com.aurora.app.source.LocalSource
 import com.aurora.app.source.MusicSource
 import com.aurora.app.source.SoundCloudSource
@@ -109,6 +110,7 @@ class MainActivity : Activity() {
     private val importManager by lazy { MusicImportManager(this, database) }
     private val downloadManager by lazy { DownloadManager(this, database) }
     private val soundCloudSource by lazy { SoundCloudSource(applicationContext) }
+    private val audiusSource by lazy { AudiusSource() }
     private val localSource by lazy { LocalSource(libraryRepository, context = applicationContext) }
     private var allTracks: List<Track> = emptyList()
     /** Track ids with a verified completed Aurora download (drives the Downloaded bucket). */
@@ -1261,11 +1263,19 @@ class MainActivity : Activity() {
 
         searchSourceTabs.clear()
         val sourceRow = buildSegmentedRow(
-            listOf("Local", "SoundCloud"),
-            if (currentSearchSource == "local") 0 else 1,
+            listOf("Local", "Audius", "SoundCloud"),
+            when (currentSearchSource) {
+                "audius" -> 1
+                "soundcloud" -> 2
+                else -> 0
+            },
             searchSourceTabs
         ) { index ->
-            currentSearchSource = if (index == 0) "local" else "soundcloud"
+            currentSearchSource = when (index) {
+                1 -> "audius"
+                2 -> "soundcloud"
+                else -> "local"
+            }
             updateSegmentedSelection(searchSourceTabs, index)
             filterSearch(searchInput?.text?.toString() ?: "")
         }
@@ -1503,6 +1513,20 @@ class MainActivity : Activity() {
         uiHandler.postDelayed(runnable, 350L)
     }
 
+    /** Resolves the source behind the active Search tab (Local / Audius / SoundCloud). */
+    private fun activeSearchSource(): MusicSource = when (currentSearchSource) {
+        "audius" -> audiusSource
+        "soundcloud" -> soundCloudSource
+        else -> localSource
+    }
+
+    /** Resolves a MusicSource from a stored source id (queue retry, remote playback). */
+    private fun sourceForId(sourceId: String): MusicSource = when (sourceId) {
+        audiusSource.sourceId -> audiusSource
+        soundCloudSource.sourceId -> soundCloudSource
+        else -> localSource
+    }
+
     private fun runSearch(query: String) {
         val results = searchResultsContainer ?: return
         val status = searchStatusContainer ?: return
@@ -1515,10 +1539,10 @@ class MainActivity : Activity() {
             status.addView(
                 buildStateCard(
                     "Search your music",
-                    if (currentSearchSource == "soundcloud") {
-                        "Find tracks on SoundCloud. Results stream, and can be downloaded when the artist allows it."
-                    } else {
-                        "Find tracks on this device and in Aurora storage."
+                    when (currentSearchSource) {
+                        "soundcloud" -> "Find tracks on SoundCloud. Results stream, and can be downloaded when the artist allows it."
+                        "audius" -> "Find tracks on Audius. Results stream online, no sign-in required."
+                        else -> "Find tracks on this device and in Aurora storage."
                     },
                     false
                 )
@@ -1527,11 +1551,15 @@ class MainActivity : Activity() {
         }
 
         val requestId = ++searchRequestToken
-        val source: MusicSource = if (currentSearchSource == "soundcloud") soundCloudSource else localSource
+        val source: MusicSource = activeSearchSource()
         status.addView(
             buildStateCard(
                 "Searching…",
-                if (currentSearchSource == "soundcloud") "Querying SoundCloud for \"$query\"" else "Searching your library for \"$query\"",
+                when (currentSearchSource) {
+                    "soundcloud" -> "Querying SoundCloud for \"$query\""
+                    "audius" -> "Querying Audius for \"$query\""
+                    else -> "Searching your library for \"$query\""
+                },
                 true
             )
         )
@@ -1573,11 +1601,12 @@ class MainActivity : Activity() {
             val unavailable = !playable
             val downloaded = localCopy != null
             val downloadable = !downloaded && (caps.contains(SourceCapability.DOWNLOAD) || (isLocal && metadata.localUri != null))
+            val remoteName = if (metadata.trackId.source == audiusSource.sourceId) "Audius" else "SoundCloud"
             val label = when {
-                downloaded && !isLocal -> "SoundCloud • downloaded"
+                downloaded && !isLocal -> "$remoteName • downloaded"
                 downloaded -> "Local • downloaded"
                 isLocal -> "On device"
-                else -> "SoundCloud"
+                else -> remoteName
             }
             val resolvedUri = localCopy?.let { Uri.fromFile(it) } ?: metadata.localUri ?: Uri.EMPTY
             // Reuse the library Track (with its real DB id) whenever the audio is
@@ -1672,7 +1701,7 @@ class MainActivity : Activity() {
             clipToOutline = true
             outlineProvider = roundRectOutline(12)
         }
-        ArtworkLoader.loadArtwork(this, result.track, dp(52), iv)
+        ArtworkLoader.loadArtwork(this, result.track, dp(52), iv, result.metadata.artworkUri)
         art.addView(iv)
         top.addView(art)
 
@@ -1791,7 +1820,7 @@ class MainActivity : Activity() {
             triggerPlay(track)
             return
         }
-        val source: MusicSource = if (metadata.trackId.source == soundCloudSource.sourceId) soundCloudSource else localSource
+        val source: MusicSource = sourceForId(metadata.trackId.source)
         Thread {
             val streamResult = try {
                 source.stream(metadata)
@@ -2250,6 +2279,10 @@ class MainActivity : Activity() {
         soundCloudSettingsGroup = buildSoundCloudSettingsGroup()
         page.addView(soundCloudSettingsGroup)
 
+        page.addView(vGap(20))
+        page.addView(settingGroupLabel("Online sources"))
+        page.addView(buildSettingRow("Audius", "Online search and streaming — no sign-in required", "Available"))
+
         scroll.addView(page)
         settingsView = scroll
         return scroll
@@ -2697,7 +2730,7 @@ class MainActivity : Activity() {
     }
 
     private fun retryDownload(progress: DownloadProgress) {
-        val source: MusicSource = if (progress.source == soundCloudSource.sourceId) soundCloudSource else localSource
+        val source: MusicSource = sourceForId(progress.source)
         Thread {
             val metadata = try {
                 source.getTrack(SourceTrackId(progress.source, progress.sourceTrackId))

@@ -81,8 +81,48 @@ object ArtworkLoader {
 
     /**
      * Asynchronously loads artwork into an ImageView with smooth tagging to avoid recycling race conditions.
+     *
+     * When [remoteArtworkUri] is an http(s) URL (e.g. online source artwork),
+     * it is fetched on the existing worker pool and cached in memory; any
+     * failure falls back to the regular track artwork path (MediaStore art or
+     * Aurora generative art). A null value keeps the previous behavior.
      */
     fun loadArtwork(
+        context: Context,
+        track: Track,
+        targetSizePx: Int,
+        imageView: ImageView,
+        remoteArtworkUri: Uri? = null
+    ) {
+        val remote = remoteArtworkUri?.takeIf {
+            it.toString().startsWith("http://") || it.toString().startsWith("https://")
+        }
+        if (remote == null) {
+            loadLocalArtwork(context, track, targetSizePx, imageView)
+            return
+        }
+        val cacheKey = "remote_${remote}_$targetSizePx"
+        val cached = memoryCache.get(cacheKey)
+        if (cached != null) {
+            imageView.setImageBitmap(cached)
+            return
+        }
+
+        imageView.tag = cacheKey
+
+        executor.execute {
+            val bitmap = fetchRemoteArtwork(remote, targetSizePx)
+                ?: getArtworkBitmap(context, track, targetSizePx)
+            memoryCache.put(cacheKey, bitmap)
+            mainHandler.post {
+                if (imageView.tag == cacheKey) {
+                    imageView.setImageBitmap(bitmap)
+                }
+            }
+        }
+    }
+
+    private fun loadLocalArtwork(
         context: Context,
         track: Track,
         targetSizePx: Int,
@@ -104,6 +144,27 @@ object ArtworkLoader {
                     imageView.setImageBitmap(bitmap)
                 }
             }
+        }
+    }
+
+    /** Fetches a remote image without persisting it to disk; null on any failure. */
+    private fun fetchRemoteArtwork(remote: Uri, targetSizePx: Int): Bitmap? {
+        return try {
+            val connection = java.net.URL(remote.toString()).openConnection() as java.net.HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 10000
+            connection.readTimeout = 10000
+            connection.instanceFollowRedirects = true
+            connection.doInput = true
+            try {
+                if (connection.responseCode !in 200..299) return null
+                val raw = connection.inputStream.use { android.graphics.BitmapFactory.decodeStream(it) } ?: return null
+                android.graphics.Bitmap.createScaledBitmap(raw, targetSizePx, targetSizePx, true)
+            } finally {
+                connection.disconnect()
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 

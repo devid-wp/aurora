@@ -147,6 +147,29 @@ in this build" and online search stays offline — exactly what the
 
 Never commit `android/soundcloud.properties` (already git-ignored).
 
+## Online music sources
+
+Aurora plays local Aurora-owned files plus two online streaming sources.
+Both reuse the same `MusicSource` interface, search UI, `PlaybackService`,
+and artwork pipeline — there is one player and one library model.
+
+Audius
+- online search + streaming, no user sign-in required
+- source implementation: `app/src/main/java/com/aurora/app/source/AudiusSource.kt`
+- official docs: https://docs.audius.co/ (API base `https://api.audius.co/v1`,
+  machine-readable contract at `https://api.audius.co/v1/swagger.yaml`)
+- an optional developer key can be bundled as `AUDIUS_API_KEY`
+  (`soundcloud.properties`-style `-PAUDIUS_API_KEY=…`, env, or BuildConfig);
+  it is sent as the `x-api-key` header when present and stays empty otherwise
+- stream URLs are signed and expiring: resolved fresh on every play via
+  `GET /v1/tracks/{id}/stream?no_redirect=true`, never persisted
+- downloads are never offered for Audius tracks (streaming source only)
+
+SoundCloud
+- optional; requires configured credentials (see SoundCloud setup above)
+- account connect (OAuth + PKCE), likes sync, and explicit
+  artist-permitted downloads stay exactly as implemented
+
 ## Scope
 
 Implemented: local MediaStore scanning, artwork loading, search, library

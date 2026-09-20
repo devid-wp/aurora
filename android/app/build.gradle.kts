@@ -63,12 +63,16 @@ android {
             buildConfigField("String", "SOUNDCLOUD_CLIENT_ID", gradleStringLiteral(soundCloudClientId))
             buildConfigField("String", "SOUNDCLOUD_CLIENT_SECRET", gradleStringLiteral(soundCloudClientSecret))
             buildConfigField("String", "SOUNDCLOUD_REDIRECT_URI", gradleStringLiteral(soundCloudRedirectUri))
+            // Optional Audius developer key (x-api-key header). Empty by default:
+            // public catalog reads work without user sign-in.
+            buildConfigField("String", "AUDIUS_API_KEY", gradleStringLiteral(soundCloudCredential("AUDIUS_API_KEY", "AUDIUS_API_KEY")))
         }
         release {
             isMinifyEnabled = false
             buildConfigField("String", "SOUNDCLOUD_CLIENT_ID", gradleStringLiteral(soundCloudClientId))
             buildConfigField("String", "SOUNDCLOUD_CLIENT_SECRET", gradleStringLiteral(soundCloudClientSecret))
             buildConfigField("String", "SOUNDCLOUD_REDIRECT_URI", gradleStringLiteral(soundCloudRedirectUri))
+            buildConfigField("String", "AUDIUS_API_KEY", gradleStringLiteral(soundCloudCredential("AUDIUS_API_KEY", "AUDIUS_API_KEY")))
         }
     }
 

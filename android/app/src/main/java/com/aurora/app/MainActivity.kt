@@ -181,6 +181,17 @@ class MainActivity : Activity() {
     private var fpQueueList: LinearLayout? = null
     private var fpHeaderCenter: LinearLayout? = null
     private var fpContentContainer: LinearLayout? = null
+    private var heroContainer: LinearLayout? = null
+    private var heroPlayingView: FrameLayout? = null
+    private var heroEmptyView: LinearLayout? = null
+    private var heroArtView: ImageView? = null
+    private var heroTitle: TextView? = null
+    private var heroArtist: TextView? = null
+    private var heroPosTxt: TextView? = null
+    private var heroDurTxt: TextView? = null
+    private var heroProgress: ProgressBar? = null
+    private var heroPlayBtn: ImageView? = null
+    private var heroFavBtn: ImageView? = null
     private var isShuffle = false
     private var isRepeat = false
     private var userSeeking = false
@@ -559,6 +570,7 @@ class MainActivity : Activity() {
         contentContainer?.addView(view, FrameLayout.LayoutParams(MP, MP))
         view.animate().alpha(1f).setDuration(180).start()
         updateNavSelection()
+        if (tabIndex == 0) refreshHero()
         if (tabIndex == 3 && libraryNeedsRefresh) {
             libraryNeedsRefresh = false
             loadLibrary()
@@ -585,6 +597,7 @@ class MainActivity : Activity() {
 
         val isFav = favoriteTrackIds.contains(track.id)
         fpHeartBtn?.imageTintList = ColorStateList.valueOf(if (isFav) purple else textMuted)
+        heroFavBtn?.imageTintList = ColorStateList.valueOf(if (isFav) purple else textMuted)
         recents.removeAll { it.id == track.id }
         recents.add(0, track)
         while (recents.size > 8) recents.removeAt(recents.lastIndex)
@@ -592,6 +605,7 @@ class MainActivity : Activity() {
         updateRecentsUI()
         updateQueueUI()
         updateFullPlayerQueue()
+        updateHeroTrack(track)
         syncMiniPlayerVisibility()
     }
 
@@ -601,6 +615,7 @@ class MainActivity : Activity() {
         miniPlayBtn?.imageTintList = ColorStateList.valueOf(if (isPlaying) text else purple)
         fpPlayBtn?.setImageResource(res)
         fpPlayBtn?.background = circle(if (isPlaying) purple else purple)
+        heroPlayBtn?.setImageResource(res)
     }
 
     private fun onProgressUpdate(posMs: Int, durMs: Int) {
@@ -613,6 +628,10 @@ class MainActivity : Activity() {
                 fpPosTxt?.text = msToLabel(posMs)
             }
             fpDurTxt?.text = msToLabel(durMs)
+            heroProgress?.max = durMs
+            heroProgress?.progress = posMs
+            heroPosTxt?.text = msToLabel(posMs)
+            heroDurTxt?.text = msToLabel(durMs)
         }
     }
 
@@ -630,6 +649,7 @@ class MainActivity : Activity() {
 
         page.addView(buildHomeHeader())
         page.addView(buildMixRow())
+        page.addView(buildHeroSection())
         page.addView(buildSectionHeader("Recently Played", true) { showTab(3) })
         val recentWrap = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
@@ -766,6 +786,219 @@ class MainActivity : Activity() {
         section.addView(row)
         section.addView(vGap(20))
         return section
+    }
+
+    private fun buildHeroSection(): LinearLayout {
+        val section = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), 0, dp(24), 0)
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        heroContainer = container
+        section.addView(container)
+        section.addView(vGap(20))
+        refreshHero()
+        return section
+    }
+
+    private fun refreshHero() {
+        val container = heroContainer ?: return
+        val track = svc?.currentTrack
+        if (track == null) {
+            if (heroEmptyView == null) heroEmptyView = buildHeroEmpty()
+            if (container.childCount == 0 || container.getChildAt(0) != heroEmptyView) {
+                container.removeAllViews()
+                container.addView(heroEmptyView)
+            }
+        } else {
+            updateHeroTrack(track)
+            onPlayStateChanged(svc?.isPlaying == true)
+            onProgressUpdate(svc?.positionMs ?: 0, svc?.durationMs ?: 0)
+        }
+    }
+
+    private fun buildHeroEmpty(): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = rounded(surface, 22).apply {
+                setStroke(dp(1), Color.argb(32, 124, 92, 252))
+            }
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+            clipToOutline = true
+            outlineProvider = roundRectOutline(22)
+            elevation = dp(8).toFloat()
+            isClickable = true
+            isFocusable = true
+            foreground = ripple()
+            setOnClickListener {
+                val first = allTracks.firstOrNull()
+                if (first != null) triggerPlay(first)
+            }
+            addView(ImageView(this@MainActivity).apply {
+                setImageResource(R.drawable.ic_aurora_logo)
+                imageTintList = ColorStateList.valueOf(purple)
+                layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).also { it.rightMargin = dp(14) }
+            })
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, WC, 1f)
+                addView(label("Nothing playing", 16, text, true))
+                addView(vGap(4))
+                addView(label("Choose a song and it will appear here.", 12, textSecondary, false))
+            })
+        }
+    }
+
+    private fun buildHeroPlaying(): FrameLayout {
+        val card = FrameLayout(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                intArrayOf(Color.rgb(44, 30, 78), Color.rgb(18, 19, 26))
+            ).apply {
+                cornerRadius = dp(22).toFloat()
+                setStroke(dp(1), Color.argb(45, 124, 92, 252))
+            }
+            clipToOutline = true
+            outlineProvider = roundRectOutline(22)
+            elevation = dp(8).toFloat()
+            isClickable = true
+            isFocusable = true
+            foreground = ripple()
+            setOnClickListener { showFullPlayer() }
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        val artWrap = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(104), dp(104)).also { it.rightMargin = dp(14) }
+            background = rounded(elevated, 16)
+            clipToOutline = true
+            outlineProvider = roundRectOutline(16)
+        }
+        val art = ImageView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(MP, MP)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+        }
+        heroArtView = art
+        artWrap.addView(art)
+        row.addView(artWrap)
+
+        val info = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, WC, 1f)
+        }
+        heroTitle = label("Unknown track", 15, text, true).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        heroArtist = label("Unknown artist", 12, textSecondary, false).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        info.addView(heroTitle)
+        info.addView(vGap(2))
+        info.addView(heroArtist)
+        info.addView(vGap(10))
+        val progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            progressTintList = ColorStateList.valueOf(purple)
+            progressBackgroundTintList = ColorStateList.valueOf(higher)
+            layoutParams = LinearLayout.LayoutParams(MP, dp(3))
+            max = 100
+        }
+        heroProgress = progress
+        info.addView(progress)
+        info.addView(vGap(6))
+        val times = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        heroPosTxt = label("0:00", 11, textMuted, false)
+        heroDurTxt = label("0:00", 11, textMuted, false)
+        times.addView(heroPosTxt)
+        times.addView(spacerH())
+        times.addView(heroDurTxt)
+        info.addView(times)
+        info.addView(vGap(10))
+
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val prev = ImageView(this).apply {
+            setImageResource(R.drawable.ic_skip_previous)
+            imageTintList = ColorStateList.valueOf(textSecondary)
+            layoutParams = LinearLayout.LayoutParams(dp(24), dp(24)).also { it.rightMargin = dp(12) }
+            isClickable = true
+            isFocusable = true
+            foreground = ripple()
+            setOnClickListener { svc?.previous() }
+            contentDescription = "Previous track"
+        }
+        val play = ImageView(this).apply {
+            setImageResource(R.drawable.ic_play)
+            background = rounded(purple, 16)
+            imageTintList = ColorStateList.valueOf(text)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).also { it.rightMargin = dp(12) }
+            isClickable = true
+            isFocusable = true
+            foreground = ripple()
+            setOnClickListener { svc?.togglePlayPause() }
+            contentDescription = "Play or pause"
+        }
+        heroPlayBtn = play
+        val next = ImageView(this).apply {
+            setImageResource(R.drawable.ic_skip_next)
+            imageTintList = ColorStateList.valueOf(textSecondary)
+            layoutParams = LinearLayout.LayoutParams(dp(24), dp(24)).also { it.rightMargin = dp(12) }
+            isClickable = true
+            isFocusable = true
+            foreground = ripple()
+            setOnClickListener { svc?.next() }
+            contentDescription = "Next track"
+        }
+        val fav = ImageView(this).apply {
+            setImageResource(R.drawable.ic_heart)
+            imageTintList = ColorStateList.valueOf(textMuted)
+            layoutParams = LinearLayout.LayoutParams(dp(22), dp(22))
+            isClickable = true
+            isFocusable = true
+            foreground = ripple()
+            setOnClickListener {
+                val cur = svc?.currentTrack ?: return@setOnClickListener
+                toggleFavorite(cur)
+            }
+            contentDescription = "Favorite"
+        }
+        heroFavBtn = fav
+        controls.addView(prev)
+        controls.addView(play)
+        controls.addView(next)
+        controls.addView(fav)
+        info.addView(controls)
+        row.addView(info)
+        card.addView(row)
+        return card
+    }
+
+    private fun updateHeroTrack(track: Track) {
+        val container = heroContainer ?: return
+        if (heroPlayingView == null) heroPlayingView = buildHeroPlaying()
+        if (container.childCount == 0 || container.getChildAt(0) != heroPlayingView) {
+            container.removeAllViews()
+            container.addView(heroPlayingView)
+        }
+        heroTitle?.text = track.title.ifBlank { "Unknown track" }
+        heroArtist?.text = track.artist.ifBlank { "Unknown artist" }
+        heroArtView?.let { ArtworkLoader.loadArtwork(this, track, dp(104), it) }
+        heroProgress?.max = track.duration.toInt().coerceAtLeast(1)
+        heroDurTxt?.text = track.durationLabel
+        heroFavBtn?.imageTintList = ColorStateList.valueOf(if (favoriteTrackIds.contains(track.id)) purple else textMuted)
     }
 
     private fun buildSectionHeader(title: String, showArrow: Boolean, onAction: (() -> Unit)? = null): LinearLayout {
@@ -2403,6 +2636,9 @@ class MainActivity : Activity() {
         if (wasFav) favoriteTrackIds.remove(track.id) else favoriteTrackIds.add(track.id)
         persistState()
         fpHeartBtn?.imageTintList = ColorStateList.valueOf(if (favoriteTrackIds.contains(track.id)) purple else textMuted)
+        if (svc?.currentTrack?.id == track.id) {
+            heroFavBtn?.imageTintList = ColorStateList.valueOf(if (favoriteTrackIds.contains(track.id)) purple else textMuted)
+        }
         if (selectedTab == 0) populateAllViews(allTracks)
     }
 

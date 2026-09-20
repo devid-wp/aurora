@@ -115,6 +115,10 @@ class MainActivity : Activity() {
     private var allTracks: List<Track> = emptyList()
     /** Track ids with a verified completed Aurora download (drives the Downloaded bucket). */
     private var downloadedTrackIds: Set<Long> = emptySet()
+    /** Saved online library entries by track id (fresh stream resolved per play). */
+    private var savedOnlineMeta: Map<Long, SourceMetadata> = emptyMap()
+    /** Online source metadata behind the currently playing remote track, if any. */
+    private var currentOnlineMetadata: SourceMetadata? = null
     private var activeDownloadView = false
     private var libraryNeedsRefresh = false
     private var currentSearchSource = "local"
@@ -494,13 +498,21 @@ class MainActivity : Activity() {
         Thread {
             try {
                 // Aurora-owned library only: explicit user imports + explicit
-                // Aurora downloads. Phone music is never auto-adopted.
+                // Aurora downloads + explicitly saved online entries. Phone
+                // music is never auto-adopted.
                 val auroraTracks = libraryRepository.getAuroraTracks()
-                downloadedTrackIds = downloadRepository.getAll()
+                val savedOnline = libraryRepository.getSavedOnlineTracks()
+                // A download that completed for a saved entry is file-backed;
+                // the file row (if any) wins over the remote entry.
+                val downloadedIds = downloadRepository.getAll()
                     .filter { it.status == "completed" && it.trackId != null }
                     .mapNotNull { it.trackId }
                     .toSet()
-                runOnUiThread { onTracksLoaded(auroraTracks) }
+                downloadedTrackIds = downloadedIds
+                savedOnlineMeta = libraryRepository.getSavedOnlineMetadata()
+                    .filterKeys { it !in downloadedIds }
+                val visibleSaved = savedOnline.filter { it.id !in downloadedIds }
+                runOnUiThread { onTracksLoaded(auroraTracks + visibleSaved) }
             } catch (e: Exception) {
                 runOnUiThread { showLibraryError(e.message ?: "Could not load your library.") }
             }
@@ -606,9 +618,17 @@ class MainActivity : Activity() {
         fpSeekBar?.progress = 0
         fpPosTxt?.text = "0:00"
 
-        val isFav = favoriteTrackIds.contains(track.id)
+        val isFav = if (track.uri.scheme == "http" || track.uri.scheme == "https") {
+            // Check if it's a saved online track (might not have a stable id in favoriteTrackIds yet)
+            // We use the source-aware check if possible, but Track only has URI.
+            // We'll check if it's in savedOnlineMeta which is updated in loadLibrary().
+            savedOnlineMeta.containsKey(track.id) || favoriteTrackIds.contains(track.id)
+        } else {
+            favoriteTrackIds.contains(track.id)
+        }
         fpHeartBtn?.imageTintList = ColorStateList.valueOf(if (isFav) purple else textMuted)
         heroFavBtn?.imageTintList = ColorStateList.valueOf(if (isFav) purple else textMuted)
+
         recents.removeAll { it.id == track.id }
         recents.add(0, track)
         while (recents.size > 8) recents.removeAt(recents.lastIndex)
@@ -1805,15 +1825,8 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun stableTrackId(source: String, value: String): Long {
-        val input = "$source:$value".toByteArray(Charsets.UTF_8)
-        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(input)
-        var result = 0L
-        for (i in 0..7) {
-            result = (result shl 8) or (digest[i].toLong() and 0xFFL)
-        }
-        return if (result == 0L) 1L else result
-    }
+    private fun stableTrackId(source: String, value: String): Long =
+        com.aurora.app.source.stableSourceTrackId(source, value)
 
     private fun playRemoteTrack(track: Track, metadata: SourceMetadata?) {
         if (metadata == null) {
@@ -2077,6 +2090,8 @@ class MainActivity : Activity() {
         // Explicit Aurora downloads (verified local copy) come first so they
         // stay in Downloaded even though they are also local files.
         if (downloadedTrackIds.contains(track.id)) return TrackFilter.DOWNLOADED
+        // Saved online entries have no local file until explicitly downloaded.
+        if (savedOnlineMeta.containsKey(track.id)) return TrackFilter.ONLINE
         return when (track.uri.scheme?.lowercase()) {
             "http", "https" -> TrackFilter.ONLINE     // network source tracks when present
             else -> TrackFilter.LOCAL                 // explicitly imported Aurora files
@@ -2135,7 +2150,12 @@ class MainActivity : Activity() {
         }
         container.addView(label("${visible.size} tracks", 12, textMuted, false).apply { setPadding(0, 0, 0, dp(12)) })
         visible.forEachIndexed { i, track ->
-            container.addView(buildTrackRow(track, i + 1, true))
+            val onlineMeta = savedOnlineMeta[track.id]
+            if (onlineMeta != null) {
+                container.addView(buildTrackRow(track, i + 1, true, source = onlineMeta.trackId.source.replaceFirstChar { it.uppercase() }, sourceMetadata = onlineMeta))
+            } else {
+                container.addView(buildTrackRow(track, i + 1, true))
+            }
             if (i < visible.lastIndex) container.addView(dividerRow())
         }
     }
@@ -2226,7 +2246,11 @@ class MainActivity : Activity() {
     }
 
     /** Shows the tracks of one album/artist inside the Library with a back row. */
-    private fun showLibraryDrillDown(title: String, tracks: List<Track>) {
+    private fun showLibraryDrillDown(
+        title: String,
+        tracks: List<Track>,
+        metaById: Map<Long, SourceMetadata> = emptyMap()
+    ) {
         val container = libraryContainer ?: return
         activeDownloadView = false
         trackFilterRow?.visibility = View.GONE
@@ -2236,7 +2260,12 @@ class MainActivity : Activity() {
         container.addView(buildSettingRow("‹  $title", trackWordCount, "Back") { renderLibrarySection() })
         container.addView(vGap(4))
         tracks.forEachIndexed { i, track ->
-            container.addView(buildTrackRow(track, i + 1, true))
+            val onlineMeta = metaById[track.id] ?: savedOnlineMeta[track.id]
+            if (onlineMeta != null) {
+                container.addView(buildTrackRow(track, i + 1, true, source = onlineMeta.trackId.source.replaceFirstChar { it.uppercase() }, sourceMetadata = onlineMeta))
+            } else {
+                container.addView(buildTrackRow(track, i + 1, true))
+            }
             if (i < tracks.lastIndex) container.addView(dividerRow())
         }
     }
@@ -2881,7 +2910,7 @@ class MainActivity : Activity() {
             isFocusable = true
             foreground = ripple()
             setOnClickListener {
-                if (source == "SoundCloud" && sourceMetadata != null) {
+                if (sourceMetadata != null) {
                     playRemoteTrack(track, sourceMetadata)
                 } else if (track.uri.scheme == "http" || track.uri.scheme == "https") {
                     svc?.playTrack(track, listOf(track))
@@ -2902,7 +2931,10 @@ class MainActivity : Activity() {
             clipToOutline = true
             outlineProvider = roundRectOutline(12)
         }
-        ArtworkLoader.loadArtwork(this, track, if (compact) dp(46) else dp(54), iv)
+        ArtworkLoader.loadArtwork(
+            this, track, if (compact) dp(46) else dp(54), iv,
+            sourceMetadata?.artworkUri ?: savedOnlineMeta[track.id]?.artworkUri
+        )
         art.addView(iv)
         row.addView(art)
 
@@ -2970,18 +3002,52 @@ class MainActivity : Activity() {
                 contentDescription = "Download remote track"
             }
             actions.addView(actionBtn)
+        } else if (source == "Audius" && sourceMetadata != null) {
+            val actionBtn = TextView(this).apply {
+                text = "Unavailable"
+                setTextColor(textMuted)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                setPadding(dp(10), dp(6), dp(10), dp(6))
+                background = rounded(surface, 10)
+                isClickable = false
+                isFocusable = false
+                contentDescription = "Audius download unavailable"
+            }
+            actions.addView(actionBtn)
         }
 
         val heart = ImageView(this).apply {
             setImageResource(R.drawable.ic_heart)
-            imageTintList = ColorStateList.valueOf(if (favoriteTrackIds.contains(track.id)) purple else textMuted)
+            val isSaved = if (sourceMetadata != null) {
+                libraryRepository.isSaved(sourceMetadata.trackId.source, sourceMetadata.trackId.value)
+            } else {
+                favoriteTrackIds.contains(track.id)
+            }
+            imageTintList = ColorStateList.valueOf(if (isSaved) purple else textMuted)
             layoutParams = LinearLayout.LayoutParams(dp(20), dp(20)).also { it.leftMargin = if (source == "SoundCloud") dp(8) else dp(10) }
             isClickable = true
             isFocusable = true
             foreground = ripple()
             setOnClickListener {
-                toggleFavorite(track)
-                imageTintList = ColorStateList.valueOf(if (favoriteTrackIds.contains(track.id)) purple else textMuted)
+                if (sourceMetadata != null) {
+                    if (libraryRepository.isSaved(sourceMetadata.trackId.source, sourceMetadata.trackId.value)) {
+                        libraryRepository.unsaveOnlineTrack(com.aurora.app.source.stableSourceTrackId(sourceMetadata.trackId.source, sourceMetadata.trackId.value))
+                    } else {
+                        libraryRepository.saveOnlineTrack(sourceMetadata)
+                    }
+                } else {
+                    toggleFavorite(track)
+                }
+                // Immediate UI update for the heart
+                val nowSaved = if (sourceMetadata != null) {
+                    libraryRepository.isSaved(sourceMetadata.trackId.source, sourceMetadata.trackId.value)
+                } else {
+                    favoriteTrackIds.contains(track.id)
+                }
+                imageTintList = ColorStateList.valueOf(if (nowSaved) purple else textMuted)
+                
+                if (selectedTab == 0) renderLibrarySection()
             }
             contentDescription = "Favorite track"
         }
@@ -2998,7 +3064,7 @@ class MainActivity : Activity() {
         if (svc?.currentTrack?.id == track.id) {
             heroFavBtn?.imageTintList = ColorStateList.valueOf(if (favoriteTrackIds.contains(track.id)) purple else textMuted)
         }
-        if (selectedTab == 0) populateAllViews(allTracks)
+        if (selectedTab == 0) renderLibrarySection()
     }
 
     /**

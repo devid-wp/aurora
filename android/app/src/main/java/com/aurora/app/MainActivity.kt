@@ -262,6 +262,9 @@ class MainActivity : Activity() {
                 }
             }
         }
+        // Safe runtime diagnostics: booleans only, never secrets or URLs.
+        android.util.Log.d("AuroraSC", "launch soundcloud configured=" + soundCloudSource.isConfigured() +
+            " signedIn=" + soundCloudSource.isSignedIn())
         showTab(0)
         checkAndLoad()
         handleSoundCloudCallback(intent)
@@ -299,6 +302,11 @@ class MainActivity : Activity() {
         val data = intent?.data ?: return
         if (data.scheme != "aurora" || data.host != "soundcloud") return
 
+        // Safe diagnostics: presence flags only, never the code/state values.
+        android.util.Log.d("AuroraSC", "callback received path=" + data.path +
+            " hasCode=" + (data.getQueryParameter("code") != null) +
+            " hasError=" + (data.getQueryParameter("error") != null) +
+            " hasState=" + (data.getQueryParameter("state") != null))
         val error = data.getQueryParameter("error")
         if (error != null) {
             Toast.makeText(this, "SoundCloud sign-in failed: $error", Toast.LENGTH_LONG).show()
@@ -346,6 +354,8 @@ class MainActivity : Activity() {
 
     /** Opens the official SoundCloud consent page (authorization code + PKCE). */
     private fun startSoundCloudConnect() {
+        android.util.Log.d("AuroraSC", "connect pressed configured=" + soundCloudSource.isConfigured() +
+            " signedIn=" + soundCloudSource.isSignedIn())
         if (!soundCloudSource.isConfigured()) {
             Toast.makeText(this, "SoundCloud is not configured in this build", Toast.LENGTH_SHORT).show()
             return

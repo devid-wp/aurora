@@ -115,6 +115,38 @@ The app shows the Aurora experience across Home, Search, Library, Settings,
 Mini Player, Full Player, and Queue. The foreground playback service remains
 the single source of truth for track, progress, queue, shuffle, and repeat.
 
+## SoundCloud setup (real account + online listening)
+
+SoundCloud features (account connect, online search/stream, likes, explicit
+downloads) require SoundCloud app credentials **at build time**. Without them
+the app still builds and runs, but Settings shows "SoundCloud is unavailable
+in this build" and online search stays offline — exactly what the
+`configured=false` launch diagnostic (`adb logcat | grep AuroraSC`) reports.
+
+1. Register an application at https://developers.soundcloud.com/docs/api/register-app
+   and set its redirect URI to exactly:
+   `aurora://soundcloud/callback`
+2. Copy your credentials into the git-ignored file `android/soundcloud.properties`:
+   ```properties
+   clientId=<your client id>
+   clientSecret=<your client secret>
+   redirectUri=aurora://soundcloud/callback
+   ```
+   (Environment variables `SOUNDCLOUD_CLIENT_ID` / `SOUNDCLOUD_CLIENT_SECRET`
+   or Gradle properties work as alternatives; see `android/app/build.gradle.kts`.)
+3. Rebuild and reinstall:
+   ```sh
+   cd android && ./gradlew :app:assembleDebug
+   adb install -r app/build/outputs/apk/debug/app-debug.apk
+   ```
+4. In Aurora: Settings → Connect SoundCloud → approve in the browser.
+   Aurora validates `state`, exchanges the code with PKCE, persists encrypted
+   tokens, loads `GET /me`, and shows `Signed in as <username>`.
+   Secrets are never logged; only stage booleans and HTTP statuses appear
+   under the `AuroraSC` log tag.
+
+Never commit `android/soundcloud.properties` (already git-ignored).
+
 ## Scope
 
 Implemented: local MediaStore scanning, artwork loading, search, library

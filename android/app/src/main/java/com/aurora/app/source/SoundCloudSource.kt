@@ -598,11 +598,13 @@ class SoundCloudSource(
         val cfg = config() ?: return SoundCloudAuthResult(false, "SoundCloud is not configured")
         val storedState = tokenStore.loadPkceState()
         if (storedState != null && state != storedState) {
+            android.util.Log.d("AuroraSC", "exchange stateMismatch=true")
             tokenStore.clearPkce()
             return SoundCloudAuthResult(false, "SoundCloud sign-in state mismatch; please try again", requiresReauth = true)
         }
         val verifier = tokenStore.loadPkceVerifier()
         if (verifier.isNullOrBlank()) {
+            android.util.Log.d("AuroraSC", "exchange noPendingVerifier=true")
             return SoundCloudAuthResult(false, "No pending SoundCloud sign-in; please try again")
         }
         val response = httpClient.postForm(
@@ -619,7 +621,12 @@ class SoundCloudSource(
         )
         tokenStore.clearPkce()
         val token = parseTokenResponse(response)
-            ?: return SoundCloudAuthResult(false, "SoundCloud rejected the authorization code; please try again")
+        // Safe diagnostic: HTTP status only, never the token payload.
+        android.util.Log.d("AuroraSC", "exchange tokenHttpStatus=" + response.statusCode +
+            " parsed=" + (token != null))
+        if (token == null) {
+            return SoundCloudAuthResult(false, "SoundCloud rejected the authorization code; please try again")
+        }
         tokenStore.saveSession(token)
         // Record the authenticated account so Settings can show the username.
         // Best-effort: a profile hiccup never invalidates a good session.
@@ -672,6 +679,8 @@ class SoundCloudSource(
     fun fetchCurrentUser(): SoundCloudAccount? {
         val session = tokenStore.loadSession() ?: return null
         var response = httpClient.get("$SOUNDCLOUD_API_BASE/me", oauthHeaders(session.accessToken))
+        // Safe diagnostic: HTTP status only, never profile content.
+        android.util.Log.d("AuroraSC", "me httpStatus=" + response.statusCode)
         if (response.statusCode == 401) {
             val cfg = config() ?: return null
             val refreshed = refreshSessionOnce(cfg) ?: return null
@@ -987,6 +996,9 @@ class SoundCloudSource(
                 )
             response = httpClient.get(url, oauthHeaders(retryToken))
         }
+        // Safe diagnostic: outcome class + HTTP status only, never content.
+        android.util.Log.d("AuroraSC", "search httpStatus=" + response.statusCode +
+            " bodyPresent=" + (!response.body.isNullOrBlank()))
 
         return when {
             response.statusCode == -1 ->
@@ -1070,7 +1082,20 @@ class SoundCloudSource(
      */
     private fun resolveStreamUrl(track: SourceMetadata): Uri? {
         val urn = toTrackUrn(track.trackId.value)
-        val json = authorizedStringRequest("$SOUNDCLOUD_API_BASE/tracks/$urn/streams") ?: return null
+        val streamsUrl = "$SOUNDCLOUD_API_BASE/tracks/$urn/streams"
+        val statusHolder = intArrayOf(-1)
+        val json = authorized(
+            request = { t ->
+                val r = httpClient.get(streamsUrl, oauthHeaders(t))
+                statusHolder[0] = r.statusCode
+                r
+            },
+            parse = { r -> if (r.statusCode in 200..299) r.body else null }
+        )
+        // Safe diagnostic: status + resolution booleans only, never stream URLs (signed).
+        android.util.Log.d("AuroraSC", "streams httpStatus=" + statusHolder[0] +
+            " bodyPresent=" + (!json.isNullOrBlank()))
+        if (json == null) return null
         val isPreviewOnly = track.sourceCapabilities.contains(SourceCapability.PREVIEW) &&
             !track.sourceCapabilities.contains(SourceCapability.STREAM)
         val candidates = if (isPreviewOnly) {

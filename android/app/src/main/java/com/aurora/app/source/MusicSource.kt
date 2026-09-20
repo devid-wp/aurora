@@ -55,6 +55,18 @@ data class DownloadResult(
 )
 
 /**
+ * Outcome of a like/unlike request. A local favorite mirror is always kept
+ * by the caller; [remoteSynced] tells whether SoundCloud itself accepted the
+ * change so the UI never pretends a local favorite is a SoundCloud like.
+ */
+data class LikeResult(
+    val success: Boolean,
+    val liked: Boolean,
+    val remoteSynced: Boolean = false,
+    val message: String = ""
+)
+
+/**
  * Rich outcome of a search request, so the UI can distinguish "no matches",
  * "source not configured", and hard failures (network / HTTP / auth) instead
  * of treating everything as an empty result set.
@@ -98,4 +110,19 @@ interface MusicSource {
         onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit,
         isCancelled: () -> Boolean
     ): DownloadResult = download(track, targetDir)
+
+    /**
+     * Likes ([liked]=true) or unlikes ([liked]=false) a track on the source.
+     * Sources without account-backed likes keep the default, which reports
+     * "not supported" so callers keep the change local-only and stay honest.
+     */
+    fun setTrackLiked(track: SourceMetadata, liked: Boolean): LikeResult =
+        LikeResult(success = false, liked = liked, message = "Likes are not supported by this source")
+
+    /**
+     * Track-id values the signed-in user liked on the source, or null when
+     * unknown (not signed in, offline, auth failure). Null means "unknown",
+     * never "no likes".
+     */
+    fun getLikedTrackIds(): Set<String>? = null
 }

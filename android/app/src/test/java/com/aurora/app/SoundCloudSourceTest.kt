@@ -86,8 +86,12 @@ class SoundCloudSourceTest {
         val getRequests = mutableListOf<Pair<String, Map<String, String>>>()
         val byteRequests = mutableListOf<Pair<String, Map<String, String>>>()
         val posts = mutableListOf<Triple<String, Map<String, String>, Map<String, String>>>()
+        val postRequests = mutableListOf<Pair<String, Map<String, String>>>()
+        val deleteRequests = mutableListOf<Pair<String, Map<String, String>>>()
         val textResponses = mutableMapOf<String, SoundCloudResponse>()
         val byteResponses = mutableMapOf<String, SoundCloudResponse>()
+        val postResponses = mutableMapOf<String, SoundCloudResponse>()
+        val deleteResponses = mutableMapOf<String, SoundCloudResponse>()
         var tokenHandler: ((String, Map<String, String>, Map<String, String>) -> SoundCloudResponse)? = null
 
         private fun match(entries: Map<String, SoundCloudResponse>, url: String): SoundCloudResponse? =
@@ -104,6 +108,16 @@ class SoundCloudSourceTest {
         override fun getBytes(url: String, headers: Map<String, String>): SoundCloudResponse {
             byteRequests.add(url to headers)
             return match(byteResponses, url) ?: SoundCloudResponse(404, body = "{\"error\":\"not found\"}")
+        }
+
+        override fun post(url: String, headers: Map<String, String>): SoundCloudResponse {
+            postRequests.add(url to headers)
+            return match(postResponses, url) ?: SoundCloudResponse(404, body = "{\"error\":\"not found\"}")
+        }
+
+        override fun delete(url: String, headers: Map<String, String>): SoundCloudResponse {
+            deleteRequests.add(url to headers)
+            return match(deleteResponses, url) ?: SoundCloudResponse(404, body = "{\"error\":\"not found\"}")
         }
 
         override fun postForm(url: String, form: Map<String, String>, headers: Map<String, String>): SoundCloudResponse {
@@ -457,6 +471,8 @@ class SoundCloudSourceTest {
                 }
 
                 override fun getBytes(url: String, headers: Map<String, String>): SoundCloudResponse = client.getBytes(url, headers)
+                override fun post(url: String, headers: Map<String, String>): SoundCloudResponse = client.post(url, headers)
+                override fun delete(url: String, headers: Map<String, String>): SoundCloudResponse = client.delete(url, headers)
                 override fun postForm(url: String, form: Map<String, String>, headers: Map<String, String>): SoundCloudResponse = client.postForm(url, form, headers)
             }
         )
@@ -466,5 +482,198 @@ class SoundCloudSourceTest {
         assertEquals(1, results.size)
         // The rejected app token was dropped and a fresh one requested for the retry.
         assertEquals(2, client.posts.count { it.second["grant_type"] == "client_credentials" })
+    }
+
+    // ── Likes (official /likes + /me/likes endpoints) ──────────────────────
+
+    private fun signedInSource(client: FakeSoundCloudHttpClient): SoundCloudSource {
+        val source = configuredSource(client)
+        source.seedSessionForTesting(
+            SoundCloudToken(accessToken = "user-token", refreshToken = "user-refresh", expiresAtEpochMs = 0L)
+        )
+        return source
+    }
+
+    private fun likeMetadata(value: String = "soundcloud:tracks:123"): SourceMetadata = SourceMetadata(
+        trackId = SourceTrackId("soundcloud", value),
+        title = "Night Shift",
+        artist = "Leona",
+        album = "SoundCloud",
+        sourceCapabilities = setOf(SourceCapability.STREAM)
+    )
+
+    @Test
+    fun like_track_posts_official_likes_endpoint() {
+        val client = FakeSoundCloudHttpClient().apply {
+            postResponses["/likes/tracks/"] = SoundCloudResponse(200, body = "{\"success\":true}")
+        }
+        val source = signedInSource(client)
+
+        val result = source.setTrackLiked(likeMetadata(), true)
+
+        assertTrue(result.success)
+        assertTrue(result.remoteSynced)
+        val request = client.postRequests.firstOrNull { it.first.contains("/likes/tracks/soundcloud:tracks:123") }
+        assertNotNull("like must POST the official /likes/tracks/{urn} endpoint", request)
+        assertEquals("OAuth user-token", request?.second?.get("Authorization"))
+        assertTrue(client.deleteRequests.isEmpty())
+    }
+
+    @Test
+    fun unlike_track_deletes_official_likes_endpoint() {
+        val client = FakeSoundCloudHttpClient().apply {
+            deleteResponses["/likes/tracks/"] = SoundCloudResponse(200, body = "{\"success\":true}")
+        }
+        val source = signedInSource(client)
+
+        val result = source.setTrackLiked(likeMetadata(), false)
+
+        assertTrue(result.success)
+        assertTrue(result.remoteSynced)
+        val request = client.deleteRequests.firstOrNull { it.first.contains("/likes/tracks/soundcloud:tracks:123") }
+        assertNotNull("unlike must DELETE the official /likes/tracks/{urn} endpoint", request)
+        assertEquals("OAuth user-token", request?.second?.get("Authorization"))
+        assertTrue(client.postRequests.isEmpty())
+    }
+
+    @Test
+    fun like_without_sign_in_makes_no_network_call() {
+        val client = FakeSoundCloudHttpClient()
+        val source = configuredSource(client)
+
+        val result = source.setTrackLiked(likeMetadata(), true)
+
+        assertFalse(result.success)
+        assertFalse(result.remoteSynced)
+        assertTrue(client.postRequests.isEmpty())
+        assertTrue(client.deleteRequests.isEmpty())
+    }
+
+    @Test
+    fun liked_tracks_list_parses_track_urns() {
+        val client = FakeSoundCloudHttpClient().apply {
+            textResponses["/me/likes/tracks"] = SoundCloudResponse(
+                200,
+                body = collectionSearch(playableTrackJson(), previewTrackJson())
+            )
+        }
+        val source = signedInSource(client)
+
+        val liked = source.getLikedTrackIds()
+
+        assertNotNull(liked)
+        assertEquals(setOf("soundcloud:tracks:123", "soundcloud:tracks:456"), liked)
+    }
+
+    @Test
+    fun liked_tracks_unknown_without_sign_in() {
+        val source = configuredSource(FakeSoundCloudHttpClient())
+
+        // Null means "unknown", never "no likes".
+        assertNull(source.getLikedTrackIds())
+    }
+
+    @Test
+    fun like_401_refreshes_session_once_then_retries() {
+        val client = FakeSoundCloudHttpClient()
+        var likeAttempts = 0
+        val retryingClient = object : SoundCloudHttpClient by client {
+            override fun post(url: String, headers: Map<String, String>): SoundCloudResponse {
+                client.postRequests.add(url to headers)
+                likeAttempts++
+                return if (likeAttempts == 1) {
+                    SoundCloudResponse(401, body = "{\"error\":\"unauthorized\"}")
+                } else {
+                    SoundCloudResponse(200, body = "{\"success\":true}")
+                }
+            }
+        }
+        val retryingSource = SoundCloudSource(
+            clientIdProvider = { "demo_client_id" },
+            clientSecretProvider = { "demo_secret" },
+            redirectUriProvider = { "aurora://soundcloud/callback" },
+            httpClient = retryingClient
+        )
+        retryingSource.seedSessionForTesting(
+            SoundCloudToken(
+                accessToken = "stale-token",
+                refreshToken = "single-use-refresh",
+                expiresAtEpochMs = 0L
+            )
+        )
+        client.tokenHandler = { grantType, _, _ ->
+            when (grantType) {
+                "refresh_token" -> SoundCloudResponse(200, body = tokenJson(access = "fresh-token", refresh = "next-refresh", expiresIn = 3600))
+                else -> SoundCloudResponse(200, body = tokenJson())
+            }
+        }
+        // The retrying source carries the stale user session; the fake client
+        // serves the refresh grant so the 401 is recovered exactly once.
+        val result = retryingSource.setTrackLiked(likeMetadata(), true)
+
+        assertTrue(result.success)
+        assertTrue(result.remoteSynced)
+        assertEquals(2, likeAttempts)
+        assertEquals(1, client.posts.count { it.second["grant_type"] == "refresh_token" })
+        assertEquals("OAuth fresh-token", client.postRequests.last().second["Authorization"])
+        assertTrue(retryingSource.isSignedIn())
+    }
+
+    // ── Disconnect (official POST /disconnect) ────────────────────────────
+
+    @Test
+    fun disconnect_revokes_app_access_then_reports_success() {
+        val client = FakeSoundCloudHttpClient().apply {
+            postResponses["/disconnect"] = SoundCloudResponse(204, body = null)
+        }
+        val source = signedInSource(client)
+
+        assertTrue(source.disconnectRemote())
+
+        val request = client.postRequests.firstOrNull { it.first.endsWith("/disconnect") }
+        assertNotNull("disconnect must POST the official /disconnect endpoint", request)
+        assertEquals("OAuth user-token", request?.second?.get("Authorization"))
+    }
+
+    @Test
+    fun disconnect_unsupported_token_reports_false() {
+        val client = FakeSoundCloudHttpClient().apply {
+            postResponses["/disconnect"] = SoundCloudResponse(400, body = "{\"error\":\"not supported\"}")
+        }
+        val source = signedInSource(client)
+
+        // 400 means the token type cannot be revoked remotely; the caller
+        // still clears local credentials and says so honestly.
+        assertFalse(source.disconnectRemote())
+    }
+
+    // ── Token persistence + secrecy ───────────────────────────────────────
+
+    @Test
+    fun session_and_account_persist_and_clear_together() {
+        val source = configuredSource(FakeSoundCloudHttpClient())
+        assertFalse(source.isSignedIn())
+
+        source.seedSessionForTesting(
+            SoundCloudToken(accessToken = "abc", refreshToken = "def", expiresAtEpochMs = 123L)
+        )
+        assertTrue(source.isSignedIn())
+
+        source.clearAuthentication()
+        assertFalse(source.isSignedIn())
+        assertNull(source.signedInAccountName())
+        assertNull(source.getLikedTrackIds())
+    }
+
+    @Test
+    fun token_and_config_string_forms_never_expose_secrets() {
+        val token = SoundCloudToken(accessToken = "secret-access", refreshToken = "secret-refresh")
+        val tokenText = token.toString()
+        assertFalse(tokenText.contains("secret-access"))
+        assertFalse(tokenText.contains("secret-refresh"))
+
+        val config = com.aurora.app.source.SoundCloudConfig(clientId = "cid123", clientSecret = "top-secret-value")
+        val configText = config.toString()
+        assertFalse(configText.contains("top-secret-value"))
     }
 }

@@ -63,6 +63,10 @@ interface SoundCloudHttpClient {
     fun get(url: String, headers: Map<String, String>): SoundCloudResponse
     fun getBytes(url: String, headers: Map<String, String>): SoundCloudResponse
     fun postForm(url: String, form: Map<String, String>, headers: Map<String, String>): SoundCloudResponse
+    /** Bodiless POST (likes, disconnect). Follows the same contract as [get]. */
+    fun post(url: String, headers: Map<String, String>): SoundCloudResponse
+    /** DELETE (unlike). Follows the same contract as [get]. */
+    fun delete(url: String, headers: Map<String, String>): SoundCloudResponse
 }
 
 class DefaultSoundCloudHttpClient : SoundCloudHttpClient {
@@ -71,6 +75,12 @@ class DefaultSoundCloudHttpClient : SoundCloudHttpClient {
 
     override fun getBytes(url: String, headers: Map<String, String>): SoundCloudResponse =
         request("GET", url, headers, readBytes = true)
+
+    override fun post(url: String, headers: Map<String, String>): SoundCloudResponse =
+        request("POST", url, headers)
+
+    override fun delete(url: String, headers: Map<String, String>): SoundCloudResponse =
+        request("DELETE", url, headers)
 
     override fun postForm(url: String, form: Map<String, String>, headers: Map<String, String>): SoundCloudResponse {
         val payload = form.entries.joinToString("&") { (key, value) ->
@@ -140,7 +150,11 @@ data class SoundCloudConfig(
     val clientId: String,
     val clientSecret: String,
     val redirectUri: String = SOUNDCLOUD_DEFAULT_REDIRECT_URI
-)
+) {
+    /** Redacted: the client secret must never appear in logs or crash reports. */
+    override fun toString(): String =
+        "SoundCloudConfig(clientId=${clientId.take(4)}···, clientSecret=···, redirectUri=$redirectUri)"
+}
 
 /** OAuth 2.1 token bundle returned by the SoundCloud token endpoint. */
 data class SoundCloudToken(
@@ -149,6 +163,27 @@ data class SoundCloudToken(
     val expiresAtEpochMs: Long = 0L,
     val tokenType: String = "Bearer",
     val scope: String? = null
+) {
+    /** Redacted: tokens must never appear in logs or crash reports. */
+    override fun toString(): String = buildString {
+        append("SoundCloudToken(accessToken=")
+        append(if (accessToken.isNotBlank()) "···" else "<blank>")
+        append(", refreshToken=")
+        append(if (refreshToken != null) "···" else "null")
+        append(", expiresAtEpochMs=").append(expiresAtEpochMs)
+        append(", tokenType=").append(tokenType)
+        append(", scope=").append(scope ?: "null")
+        append(")")
+    }
+}
+
+/**
+ * Minimum authenticated-account information Aurora keeps after a successful
+ * sign-in. Only what the Settings screen needs to confirm the connection.
+ */
+data class SoundCloudAccount(
+    val username: String,
+    val permalink: String? = null
 )
 
 /** Result of an interactive authorization attempt; surfaced to the UI. */
@@ -194,6 +229,18 @@ class SoundCloudTokenStore(private val context: Context?) {
 
     fun clearAppToken() {
         removePref(APP_TOKEN_KEY)
+    }
+
+    // ── Authenticated account (minimum profile information) ───────────────
+
+    fun saveAccount(account: SoundCloudAccount) {
+        putPref(ACCOUNT_KEY, accountToJson(account))
+    }
+
+    fun loadAccount(): SoundCloudAccount? = getPref(ACCOUNT_KEY)?.let { accountFromJson(it) }
+
+    fun clearAccount() {
+        removePref(ACCOUNT_KEY)
     }
 
     // ── User-supplied app credentials ─────────────────────────────────────
@@ -250,12 +297,14 @@ class SoundCloudTokenStore(private val context: Context?) {
     fun clearAll() {
         clearSession()
         clearAppToken()
+        clearAccount()
         clearPkce()
     }
 
     companion object {
         private const val SESSION_KEY = "soundcloud_oauth_token"
         private const val APP_TOKEN_KEY = "soundcloud_app_token"
+        private const val ACCOUNT_KEY = "soundcloud_account"
         private const val CONFIG_KEY = "soundcloud_config"
         private const val VERIFIER_KEY = "soundcloud_pkce_verifier"
         private const val STATE_KEY = "soundcloud_pkce_state"
@@ -362,6 +411,19 @@ private fun configFromJson(raw: String): SoundCloudConfig {
     return SoundCloudConfig(clientId, clientSecret, redirectUri)
 }
 
+private fun accountToJson(account: SoundCloudAccount): String = buildString {
+    append("{")
+    append("\"username\":\"").append(escapeJson(account.username)).append("\"")
+    append(",\"permalink\":\"").append(escapeJson(account.permalink ?: "")).append("\"")
+    append("}")
+}
+
+private fun accountFromJson(raw: String): SoundCloudAccount {
+    val username = extractJsonString(raw, "username")
+    val permalink = extractJsonString(raw, "permalink")
+    return SoundCloudAccount(username = username, permalink = permalink.ifBlank { null })
+}
+
 internal fun escapeJson(value: String): String = value
     .replace("\\", "\\\\")
     .replace("\"", "\\\"")
@@ -428,9 +490,13 @@ internal fun extractJsonObject(raw: String, key: String): String {
  *   GET  {api}/tracks?q=..&limit=..&linked_partitioning=true   search
  *   GET  {api}/tracks/{track_urn}                              track lookup
  *   GET  {api}/tracks/{track_urn}/streams                      stream URLs
+ *   GET  {api}/me                                              authenticated profile
+ *   GET  {api}/me/likes/tracks                                 authenticated likes
+ *   POST / DELETE {api}/likes/tracks/{track_urn}               like / unlike
  *   POST {auth}/oauth/token   authorization_code / refresh_token / client_credentials
  *   GET  {auth}/authorize                                      user consent
  *   GET  {api}/{download_url}                                  official download
+ *   POST {api}/disconnect                                      revoke app access
  *
  * Every API request uses `Authorization: OAuth <access_token>`.
  */
@@ -555,17 +621,72 @@ class SoundCloudSource(
         val token = parseTokenResponse(response)
             ?: return SoundCloudAuthResult(false, "SoundCloud rejected the authorization code; please try again")
         tokenStore.saveSession(token)
+        // Record the authenticated account so Settings can show the username.
+        // Best-effort: a profile hiccup never invalidates a good session.
+        fetchCurrentUser()
         return SoundCloudAuthResult(true, "Signed in to SoundCloud")
     }
 
     /**
-     * Local sign-out: clears the stored user session, app token, and PKCE
-     * material. Useful for tests and for disconnecting the account.
+     * Local sign-out: clears the stored user session, account information,
+     * app token, and PKCE material. Local Aurora music, downloads, and the
+     * library are never affected.
      */
     fun clearAuthentication() {
         tokenStore.clearSession()
         tokenStore.clearAppToken()
+        tokenStore.clearAccount()
         tokenStore.clearPkce()
+    }
+
+    /**
+     * Revokes the calling application's OAuth access via the official
+     * POST /disconnect endpoint (204 = invalidated, 400 = not supported for
+     * the current token). Best-effort and never throwing: callers always
+     * clear local credentials afterwards regardless of the outcome.
+     * Runs network I/O; call off the main thread.
+     */
+    fun disconnectRemote(): Boolean {
+        val session = tokenStore.loadSession() ?: return true
+        var response = httpClient.post("$SOUNDCLOUD_API_BASE/disconnect", oauthHeaders(session.accessToken))
+        if (response.statusCode == 401) {
+            val cfg = config() ?: return false
+            val refreshed = refreshSessionOnce(cfg) ?: return false
+            response = httpClient.post("$SOUNDCLOUD_API_BASE/disconnect", oauthHeaders(refreshed.accessToken))
+        }
+        return response.statusCode == 204
+    }
+
+    /** Username of the connected account, when known. */
+    fun signedInAccountName(): String? = tokenStore.loadAccount()?.username
+
+    /**
+     * Fetches the authenticated user profile from GET /me and stores the
+     * minimum account information (username + permalink).
+     *
+     * Requires a user session. If the access token is rejected it is refreshed
+     * exactly once (single-use refresh tokens); a failed refresh clears the
+     * invalid session so the app returns to the disconnected state. Failure to
+     * read the profile never throws.
+     */
+    fun fetchCurrentUser(): SoundCloudAccount? {
+        val session = tokenStore.loadSession() ?: return null
+        var response = httpClient.get("$SOUNDCLOUD_API_BASE/me", oauthHeaders(session.accessToken))
+        if (response.statusCode == 401) {
+            val cfg = config() ?: return null
+            val refreshed = refreshSessionOnce(cfg) ?: return null
+            response = httpClient.get("$SOUNDCLOUD_API_BASE/me", oauthHeaders(refreshed.accessToken))
+        }
+        if (response.statusCode !in 200..299) return null
+        val body = response.body ?: return null
+        val username = extractJsonString(body, "username").ifBlank { extractJsonString(body, "permalink") }
+        if (username.isBlank()) return null
+        val account = SoundCloudAccount(
+            username = username,
+            permalink = extractJsonString(body, "permalink").ifBlank { null }
+        )
+        tokenStore.saveAccount(account)
+        return account
     }
 
     /**
@@ -574,6 +695,66 @@ class SoundCloudSource(
      */
     internal fun seedSessionForTesting(token: SoundCloudToken) {
         tokenStore.saveSession(token)
+    }
+
+    // ── MusicSource: likes (official /likes + /me/likes endpoints) ─────────
+
+    /**
+     * Likes ([liked]=true, POST) or unlikes ([liked]=false, DELETE) a track
+     * through the official `/likes/tracks/{track_urn}` endpoints.
+     *
+     * Requires a signed-in user session; a 401 refreshes the session exactly
+     * once and retries. Never throws: failures are reported in [LikeResult].
+     * Runs network I/O; call off the main thread.
+     */
+    override fun setTrackLiked(track: SourceMetadata, liked: Boolean): LikeResult {
+        if (!isConfigured()) {
+            return LikeResult(success = false, liked = liked, message = "SoundCloud is not configured")
+        }
+        if (!isSignedIn()) {
+            return LikeResult(success = false, liked = liked, message = "Sign in to SoundCloud to sync likes")
+        }
+        val url = "$SOUNDCLOUD_API_BASE/likes/tracks/${toTrackUrn(track.trackId.value)}"
+        val synced = authorized(
+            request = { token ->
+                if (liked) httpClient.post(url, oauthHeaders(token))
+                else httpClient.delete(url, oauthHeaders(token))
+            },
+            parse = { response -> if (response.statusCode in 200..299) true else null }
+        ) ?: false
+        return if (synced) {
+            LikeResult(success = true, liked = liked, remoteSynced = true)
+        } else {
+            LikeResult(
+                success = false,
+                liked = liked,
+                message = if (liked) "SoundCloud like failed — kept locally"
+                else "SoundCloud unlike failed — kept locally"
+            )
+        }
+    }
+
+    /**
+     * Returns the authenticated user's liked track ids (`trackId.value`
+     * strings) from the official GET /me/likes/tracks endpoint, or null when
+     * the list cannot be determined (not signed in, offline, auth failure).
+     * Null means "unknown", never "no likes". Runs network I/O; call off the
+     * main thread.
+     */
+    override fun getLikedTrackIds(): Set<String>? {
+        if (!isConfigured() || !isSignedIn()) return null
+        val url = apiUrl("/me/likes/tracks", linkedMapOf("limit" to "100", "linked_partitioning" to "true"))
+        return authorized(
+            request = { token -> httpClient.get(url, oauthHeaders(token)) },
+            parse = { response ->
+                if (response.statusCode !in 200..299) null
+                else response.body?.let { body ->
+                    extractTrackObjects(body)
+                        .mapNotNull { metadataForTrackObject(it)?.trackId?.value }
+                        .toSet()
+                }
+            }
+        )
     }
 
     // ── OAuth: client credentials (public resources) ─────────────────────
@@ -624,6 +805,29 @@ class SoundCloudSource(
             tokenType = tokenType,
             scope = scope.ifBlank { null }
         )
+    }
+
+    /**
+     * Attempts exactly one refresh of the stored user session. Refresh tokens
+     * are single-use: when the refresh fails the invalid session (and account
+     * information) is cleared so the app returns to the disconnected state
+     * rather than retrying forever.
+     */
+    private fun refreshSessionOnce(cfg: SoundCloudConfig): SoundCloudToken? {
+        val session = tokenStore.loadSession() ?: return null
+        if (session.refreshToken.isNullOrBlank()) {
+            tokenStore.clearSession()
+            tokenStore.clearAccount()
+            return null
+        }
+        val refreshed = refreshTokenRequest(session.refreshToken, cfg)
+        if (refreshed != null) {
+            tokenStore.saveSession(refreshed)
+            return refreshed
+        }
+        tokenStore.clearSession()
+        tokenStore.clearAccount()
+        return null
     }
 
     private fun refreshTokenRequest(refreshToken: String?, cfg: SoundCloudConfig): SoundCloudToken? {
@@ -703,7 +907,14 @@ class SoundCloudSource(
         val first = request(firstToken)
         parse(first)?.let { return it }
         if (first.statusCode != 401) return null
-        // Token rejected: drop cached credentials and retry exactly once.
+        // The access token was rejected. Refresh a user session exactly once so
+        // a valid refresh token keeps the account connected instead of dropping
+        // it; only then fall back to dropping invalid tokens and retrying.
+        val cfg = config()
+        val refreshed = if (cfg != null) refreshSessionOnce(cfg) else null
+        if (refreshed != null) {
+            parse(request(refreshed.accessToken))?.let { return it }
+        }
         tokenStore.clearSession()
         tokenStore.clearAppToken()
         lastClientCredentialsAttemptMs = 0L

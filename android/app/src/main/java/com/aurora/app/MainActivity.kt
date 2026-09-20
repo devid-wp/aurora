@@ -1179,12 +1179,19 @@ class MainActivity : Activity() {
     private fun getOrCreateSearchView(): View {
         if (searchView != null) return searchView!!
 
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            setBackgroundColor(Color.TRANSPARENT)
+            isVerticalScrollBarEnabled = false
+        }
         val page = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.TRANSPARENT)
-            setPadding(dp(24), dp(48), dp(24), 0)
+            setPadding(dp(24), dp(48), dp(24), dp(24))
         }
         page.addView(label("Search", 28, text, true))
+        page.addView(vGap(8))
+        page.addView(label("Find tracks on this device and online.", 13, textSecondary, false))
         page.addView(vGap(12))
 
         val searchBox = LinearLayout(this).apply {
@@ -1256,8 +1263,9 @@ class MainActivity : Activity() {
         page.addView(searchStatusContainer)
         page.addView(searchResultsContainer)
         runSearch("")
-        searchView = page
-        return page
+        scroll.addView(page)
+        searchView = scroll
+        return scroll
     }
 
     // ── Discover: random online discovery through the configured source ──────
@@ -1630,7 +1638,13 @@ class MainActivity : Activity() {
             isClickable = true
             isFocusable = true
             foreground = ripple()
-            setOnClickListener { if (result.playable) playSearchResult(result) }
+            setOnClickListener {
+                if (result.playable) {
+                    playSearchResult(result)
+                } else {
+                    Toast.makeText(this@MainActivity, "This track is not playable from its source.", Toast.LENGTH_SHORT).show()
+                }
+            }
         }
         val art = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(dp(52), dp(52)).also { it.rightMargin = dp(12) }

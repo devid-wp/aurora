@@ -84,6 +84,7 @@ class PlaybackService : Service() {
     private val binder        = LocalBinder()
     private var player        : MediaPlayer? = null
     private var playerPrepared = false
+    private var preparing = false
     private var shouldPlay = false
     private var session       : MediaSession? = null
     private var currentArtwork: Bitmap? = null
@@ -321,6 +322,7 @@ class PlaybackService : Service() {
             }
             setOnPreparedListener { mp ->
                 playerPrepared = true
+                preparing = false
                 try {
                     if (shouldPlay) {
                         mp.start()
@@ -345,11 +347,14 @@ class PlaybackService : Service() {
                 }
             }
             setOnErrorListener { _, _, _ ->
+                preparing = false
                 listener?.onPlayStateChanged(false)
                 updatePlaybackState()
+                refreshNotification()
                 true
             }
             prepareAsync()
+            preparing = true
         }
         pushForeground()
     }
@@ -367,18 +372,26 @@ class PlaybackService : Service() {
         if (currentTrack == null) return
         shouldPlay = true
         if (!requestFocus()) return
-        if (!playerPrepared) return
-        try {
-            player?.start()
-            mainHandler.post(progressTick)
-            listener?.onPlayStateChanged(true)
-            updatePlaybackState()
-            pushForeground()
-        } catch (e: IllegalStateException) {
-            listener?.onPlayStateChanged(false)
-            updatePlaybackState()
-            refreshNotification()
+        val mp = player
+        if (playerPrepared && mp != null) {
+            // Healthy paused player: resume in place from the same position.
+            // Never rebuilds, so the track is not restarted from 0.
+            try {
+                mp.start()
+                mainHandler.post(progressTick)
+                listener?.onPlayStateChanged(true)
+                updatePlaybackState()
+                pushForeground()
+            } catch (_: IllegalStateException) {
+                // Existing player is unusable (e.g. error state): rebuild it.
+                startPlayback()
+            }
+            return
         }
+        // No paused player to resume. If a prepare is already running,
+        // onPrepared starts it because shouldPlay is true. Otherwise rebuild
+        // the current track so Play never silently does nothing.
+        if (!preparing) startPlayback()
     }
 
     private fun releasePlayer() {
@@ -388,6 +401,7 @@ class PlaybackService : Service() {
         }
         player = null
         playerPrepared = false
+        preparing = false
     }
 
     // ── Audio focus ───────────────────────────────────────────────────────

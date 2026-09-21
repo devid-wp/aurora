@@ -236,4 +236,42 @@ class DownloadManagerTest {
         assertEquals("file", stream.uri!!.scheme)
         assertTrue(File(stream.uri!!.path!!).exists())
     }
+
+    @Test
+    fun downloaded_track_preserves_online_source_identity() {
+        val localDb = AuroraDatabase.inMemory(context)
+        val storage = AuroraStorageManager(context)
+        val manager = DownloadManager(context, localDb, storage)
+        val downloadFile = File(context.cacheDir, "identity-preserved.mp3")
+        downloadFile.writeBytes("identity-audio".toByteArray())
+
+        val source = object : MusicSource {
+            override val sourceId: String = "audius"
+            override val capabilities: Set<SourceCapability> = setOf(SourceCapability.DOWNLOAD)
+            override fun search(query: String): List<SourceMetadata> = emptyList()
+            override fun getTrack(id: SourceTrackId): SourceMetadata? = null
+            override fun stream(track: SourceMetadata): StreamResult = StreamResult(uri = null, metadata = track, error = "stub")
+            override fun checkDownloadAvailability(track: SourceMetadata) =
+                com.aurora.app.source.DownloadCapability(DownloadAvailability.AVAILABLE)
+            override fun download(track: SourceMetadata, targetDir: File): DownloadResult =
+                DownloadResult(success = true, localPath = downloadFile.absolutePath)
+        }
+
+        val metadata = SourceMetadata(
+            trackId = SourceTrackId("audius", "identity-1"),
+            title = "Identity Song",
+            artist = "Remote Artist",
+            album = "Remote Album",
+            durationMs = 240000L,
+            localPath = downloadFile.absolutePath
+        )
+
+        val queued = manager.queue(source, metadata)
+        assertEquals(DownloadState.COMPLETED, awaitTerminal(manager, queued.jobId).state)
+
+        val persisted = localDb.trackDao().getBySource("audius", "identity-1")
+        assertNotNull("downloaded row must keep its online origin", persisted)
+        assertEquals("audius", persisted!!.source)
+        assertEquals("identity-1", persisted.sourceTrackId)
+    }
 }

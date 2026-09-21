@@ -8,8 +8,17 @@ enum class SourceCapability {
     STREAM,
     DOWNLOAD,
     PREVIEW,
-    BLOCKED
+    BLOCKED,
+
+    /**
+     * The item is catalog metadata whose playback happens in an external app
+     * (for example Spotify). Aurora must never try to stream or download it.
+     */
+    EXTERNAL_PLAYBACK
 }
+
+/** What a search hit represents. Aurora surfaces tracks; albums/artists are catalog items. */
+enum class SourceKind { TRACK, ALBUM, ARTIST }
 
 enum class DownloadAvailability {
     AVAILABLE,
@@ -32,7 +41,11 @@ data class SourceMetadata(
     val artworkUri: Uri? = null,
     val localUri: Uri? = null,
     val localPath: String? = null,
-    val sourceCapabilities: Set<SourceCapability> = emptySet()
+    val sourceCapabilities: Set<SourceCapability> = emptySet(),
+    /** Track vs album/artist catalog item. Kept last so existing construction is unaffected. */
+    val kind: SourceKind = SourceKind.TRACK,
+    /** Canonical external URI (e.g. `spotify:track:<id>`); null for Aurora-playable items. */
+    val externalUri: Uri? = null
 )
 
 data class DownloadCapability(
@@ -65,6 +78,22 @@ data class LikeResult(
     val remoteSynced: Boolean = false,
     val message: String = ""
 )
+
+/**
+ * Stable deterministic row id for an online source track ("audius", "zKYMk7p").
+ * SHA-256 of "source:value", first 8 bytes big-endian (0 normalizes to 1), so
+ * re-saving the same track always addresses the same database row and UI ids
+ * stay aligned between search results and saved library rows.
+ */
+internal fun stableSourceTrackId(source: String, value: String): Long {
+    val input = "$source:$value".toByteArray(Charsets.UTF_8)
+    val digest = java.security.MessageDigest.getInstance("SHA-256").digest(input)
+    var result = 0L
+    for (i in 0..7) {
+        result = (result shl 8) or (digest[i].toLong() and 0xFFL)
+    }
+    return if (result == 0L) 1L else result
+}
 
 /**
  * Rich outcome of a search request, so the UI can distinguish "no matches",

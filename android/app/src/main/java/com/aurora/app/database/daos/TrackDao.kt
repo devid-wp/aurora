@@ -28,6 +28,12 @@ interface TrackDao {
     @Query("SELECT * FROM tracks WHERE source_type = :sourceType ORDER BY title COLLATE NOCASE ASC")
     fun getBySourceType(sourceType: String): List<TrackEntity>
 
+    @Query("SELECT * FROM tracks WHERE is_saved = 1 ORDER BY title COLLATE NOCASE ASC")
+    fun getSavedOnline(): List<TrackEntity>
+
+    @Query("SELECT * FROM tracks WHERE source = :source AND source_track_id = :sourceTrackId LIMIT 1")
+    fun getBySource(source: String, sourceTrackId: String): TrackEntity?
+
     @Query("SELECT * FROM tracks WHERE artist_id = :artistId ORDER BY title COLLATE NOCASE ASC")
     fun getByArtistId(artistId: Long): List<TrackEntity>
 

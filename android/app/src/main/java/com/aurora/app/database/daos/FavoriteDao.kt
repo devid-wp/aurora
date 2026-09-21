@@ -9,16 +9,16 @@ import com.aurora.app.database.entities.FavoriteEntity
 @Dao
 interface FavoriteDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    fun addFavorite(favorite: FavoriteEntity): Long
+    fun upsert(favorite: FavoriteEntity): Long
 
     @Query("SELECT * FROM favorites ORDER BY created_at DESC")
     fun getAll(): List<FavoriteEntity>
 
-    @Query("SELECT * FROM favorites WHERE track_id = :trackId LIMIT 1")
-    fun getByTrackId(trackId: Long): FavoriteEntity?
+    @Query("SELECT * FROM favorites WHERE favorite_key = :favoriteKey LIMIT 1")
+    fun getByKey(favoriteKey: String): FavoriteEntity?
 
-    @Query("DELETE FROM favorites WHERE track_id = :trackId")
-    fun removeByTrackId(trackId: Long): Int
+    @Query("DELETE FROM favorites WHERE favorite_key = :favoriteKey")
+    fun removeByKey(favoriteKey: String): Int
 
     @Query("DELETE FROM favorites")
     fun clearAll(): Int

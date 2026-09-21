@@ -11,6 +11,7 @@ import android.graphics.Paint
 import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -18,74 +19,77 @@ import android.os.Looper
 import android.util.LruCache
 import android.util.Size
 import android.widget.ImageView
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import kotlin.math.abs
+import kotlin.math.max
 
 /**
- * Handles real album art extraction from MediaStore / audio files,
- * with high-performance in-memory caching and aesthetic Aurora cover generation
- * for tracks without embedded artwork.
+ * Handles real album art extraction from MediaStore, embedded file tags and
+ * remote online covers, with high-performance in-memory caching, request
+ * de-duplication and aesthetic Aurora cover generation as the final fallback.
  */
 object ArtworkLoader {
 
     private val maxMemory = (Runtime.getRuntime().maxMemory() / 1024).toInt()
     private val cacheSize = maxMemory / 8
     private val memoryCache = object : LruCache<String, Bitmap>(cacheSize) {
-        override fun sizeOf(key: String, bitmap: Bitmap): Int {
-            return bitmap.byteCount / 1024
-        }
+        override fun sizeOf(key: String, bitmap: Bitmap): Int = bitmap.byteCount / 1024
     }
 
     private val executor = Executors.newFixedThreadPool(3)
     private val mainHandler = Handler(Looper.getMainLooper())
 
     /**
-     * Synchronously returns artwork bitmap (from cache, MediaStore extraction, or Aurora generative art).
-     * Ideal for MediaSession and Notification lock-screen art.
+     * In-flight requests keyed by cache key. When several views (mini player,
+     * full player art/backdrop/glow) ask for the same bitmap we fetch/decode it
+     * once and deliver it to every waiter, instead of hammering the network or
+     * decoder with duplicates.
+     */
+    private val inFlight = ConcurrentHashMap<String, MutableList<ImageView>>()
+
+    /**
+     * Synchronously returns artwork (from cache, remote fetch, MediaStore,
+     * embedded tags or Aurora generative art). Safe to call from a worker
+     * thread; used for MediaSession and lock-screen art.
      */
     fun getArtworkBitmap(context: Context, track: Track, targetSizePx: Int = 512): Bitmap {
-        val cacheKey = "track_${track.id}_${track.albumId}_$targetSizePx"
-        val cached = memoryCache.get(cacheKey)
-        if (cached != null) {
-            return cached
-        }
+        val remote = remoteArtwork(track)
+        val cacheKey = cacheKey(track, targetSizePx, remote)
+        memoryCache.get(cacheKey)?.let { return it }
 
-        var bitmap: Bitmap? = null
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                bitmap = context.contentResolver.loadThumbnail(
-                    track.uri,
-                    Size(targetSizePx, targetSizePx),
-                    null
-                )
-            } else {
-                val artworkUri = ContentUris.withAppendedId(
-                    Uri.parse("content://media/external/audio/albumart"),
-                    track.albumId
-                )
-                context.contentResolver.openInputStream(artworkUri)?.use { input ->
-                    bitmap = BitmapFactory.decodeStream(input)
-                }
-            }
-        } catch (_: Exception) {
-            // Fallback to generative Aurora art
-        }
-
-        if (bitmap == null) {
-            bitmap = generateAuroraArtwork(track.title, track.artist, targetSizePx)
-        }
+        var bitmap: Bitmap? = remote?.let { fetchRemoteArtwork(it, targetSizePx) }
+        if (bitmap == null) bitmap = loadLocalArtworkBitmap(context, track, targetSizePx)
+        if (bitmap == null) bitmap = generateAuroraArtwork(track.title, track.artist, targetSizePx)
+        bitmap = normalize(bitmap, targetSizePx)
 
         memoryCache.put(cacheKey, bitmap)
         return bitmap
     }
 
     /**
-     * Asynchronously loads artwork into an ImageView with smooth tagging to avoid recycling race conditions.
+     * Asynchronously loads artwork with a callback on the main thread. Used by
+     * the playback service so it never blocks the UI or its own resolver.
+     */
+    fun loadArtworkBitmap(
+        context: Context,
+        track: Track,
+        targetSizePx: Int,
+        onLoaded: (Bitmap) -> Unit
+    ) {
+        executor.execute {
+            val bitmap = getArtworkBitmap(context, track, targetSizePx)
+            mainHandler.post { onLoaded(bitmap) }
+        }
+    }
+
+    /**
+     * Asynchronously loads artwork into an [ImageView].
      *
-     * When [remoteArtworkUri] is an http(s) URL (e.g. online source artwork),
-     * it is fetched on the existing worker pool and cached in memory; any
-     * failure falls back to the regular track artwork path (MediaStore art or
-     * Aurora generative art). A null value keeps the previous behavior.
+     * When [remoteArtworkUri] (or the track's own artwork URI) is an http(s)
+     * URL it is fetched on the worker pool and cached; any failure falls back
+     * to the regular track artwork path (embedded art, MediaStore, generative).
      */
     fun loadArtwork(
         context: Context,
@@ -94,57 +98,108 @@ object ArtworkLoader {
         imageView: ImageView,
         remoteArtworkUri: Uri? = null
     ) {
-        val remote = remoteArtworkUri?.takeIf {
-            it.toString().startsWith("http://") || it.toString().startsWith("https://")
-        }
-        if (remote == null) {
-            loadLocalArtwork(context, track, targetSizePx, imageView)
-            return
-        }
-        val cacheKey = "remote_${remote}_$targetSizePx"
-        val cached = memoryCache.get(cacheKey)
-        if (cached != null) {
+        val remote = remoteFrom(remoteArtworkUri) ?: remoteArtwork(track)
+        val key = cacheKey(track, targetSizePx, remote)
+
+        memoryCache.get(key)?.let { cached ->
+            imageView.tag = key
             imageView.setImageBitmap(cached)
             return
         }
 
-        imageView.tag = cacheKey
+        imageView.tag = key
+
+        val owners = synchronized(inFlight) {
+            val existing = inFlight[key]
+            if (existing != null) {
+                existing.add(imageView)
+                null
+            } else {
+                val created = mutableListOf(imageView)
+                inFlight[key] = created
+                created
+            }
+        }
+        if (owners == null) return // another request is already loading this key
 
         executor.execute {
-            val bitmap = fetchRemoteArtwork(remote, targetSizePx)
-                ?: getArtworkBitmap(context, track, targetSizePx)
-            memoryCache.put(cacheKey, bitmap)
+            val bitmap = if (remote != null) {
+                fetchRemoteArtwork(remote, targetSizePx) ?: getArtworkBitmap(context, track, targetSizePx)
+            } else {
+                getArtworkBitmap(context, track, targetSizePx)
+            }
+            memoryCache.put(key, bitmap)
+            val targets = synchronized(inFlight) { inFlight.remove(key) } ?: owners
             mainHandler.post {
-                if (imageView.tag == cacheKey) {
-                    imageView.setImageBitmap(bitmap)
+                targets.forEach { view ->
+                    if (view.tag == key) view.setImageBitmap(bitmap)
                 }
             }
         }
     }
 
-    private fun loadLocalArtwork(
-        context: Context,
-        track: Track,
-        targetSizePx: Int,
-        imageView: ImageView
-    ) {
-        val cacheKey = "track_${track.id}_${track.albumId}_$targetSizePx"
-        val cached = memoryCache.get(cacheKey)
-        if (cached != null) {
-            imageView.setImageBitmap(cached)
-            return
-        }
+    // ── Local artwork ─────────────────────────────────────────────────────
 
-        imageView.tag = cacheKey
+    private fun loadLocalArtworkBitmap(context: Context, track: Track, targetSizePx: Int): Bitmap? {
+        val scheme = track.uri.scheme?.lowercase()
 
-        executor.execute {
-            val bitmap = getArtworkBitmap(context, track, targetSizePx)
-            mainHandler.post {
-                if (imageView.tag == cacheKey) {
-                    imageView.setImageBitmap(bitmap)
-                }
+        // A streaming URL has no cheap local cover: probing it with
+        // MediaMetadataRetriever would mean a second network fetch just for
+        // artwork, so go straight to the generative fallback instead.
+        if (scheme == "http" || scheme == "https") return null
+
+        // 1. MediaStore thumbnail (fast path for content:// audio).
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && scheme == "content") {
+            try {
+                context.contentResolver.loadThumbnail(track.uri, Size(targetSizePx, targetSizePx), null)
+                    ?.let { return it }
+            } catch (_: Exception) {
+                // fall through
             }
         }
+
+        // 2. Embedded cover art (works for local files and content URIs).
+        try {
+            val retriever = MediaMetadataRetriever()
+            try {
+                when (scheme) {
+                    "content", "android.resource" -> retriever.setDataSource(context, track.uri)
+                    else -> track.uri.path?.let { retriever.setDataSource(it) }
+                }
+                retriever.embeddedPicture?.let { bytes ->
+                    return decodeSampled(bytes, targetSizePx)
+                }
+            } finally {
+                runCatching { retriever.release() }
+            }
+        } catch (_: Exception) {
+            // fall through
+        }
+
+        // 3. Legacy album-art provider.
+        try {
+            val artworkUri = ContentUris.withAppendedId(
+                Uri.parse("content://media/external/audio/albumart"),
+                track.albumId
+            )
+            context.contentResolver.openInputStream(artworkUri)?.use { input ->
+                val bytes = input.readBytes()
+                if (bytes.isNotEmpty()) return decodeSampled(bytes, targetSizePx)
+            }
+        } catch (_: Exception) {
+            // fall through
+        }
+
+        return null
+    }
+
+    // ── Remote artwork ────────────────────────────────────────────────────
+
+    private fun remoteArtwork(track: Track): Uri? = remoteFrom(track.artworkUri)
+
+    private fun remoteFrom(uri: Uri?): Uri? {
+        val value = uri?.toString()?.lowercase() ?: return null
+        return if (value.startsWith("http://") || value.startsWith("https://")) uri else null
     }
 
     /** Fetches a remote image without persisting it to disk; null on any failure. */
@@ -152,14 +207,23 @@ object ArtworkLoader {
         return try {
             val connection = java.net.URL(remote.toString()).openConnection() as java.net.HttpURLConnection
             connection.requestMethod = "GET"
-            connection.connectTimeout = 10000
-            connection.readTimeout = 10000
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 10_000
             connection.instanceFollowRedirects = true
             connection.doInput = true
             try {
                 if (connection.responseCode !in 200..299) return null
-                val raw = connection.inputStream.use { android.graphics.BitmapFactory.decodeStream(it) } ?: return null
-                android.graphics.Bitmap.createScaledBitmap(raw, targetSizePx, targetSizePx, true)
+                val bytes = connection.inputStream.use { input ->
+                    val out = ByteArrayOutputStream()
+                    val buffer = ByteArray(16 * 1024)
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        out.write(buffer, 0, read)
+                    }
+                    out.toByteArray()
+                }
+                if (bytes.isEmpty()) null else decodeSampled(bytes, targetSizePx)
             } finally {
                 connection.disconnect()
             }
@@ -167,6 +231,53 @@ object ArtworkLoader {
             null
         }
     }
+
+    // ── Bitmap helpers ────────────────────────────────────────────────────
+
+    /** Decodes [bytes], downsampling so the result is near [targetSizePx]. */
+    private fun decodeSampled(bytes: ByteArray, targetSizePx: Int): Bitmap? {
+        if (bytes.isEmpty()) return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = computeInSampleSize(bounds.outWidth, bounds.outHeight, targetSizePx)
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+    }
+
+    private fun computeInSampleSize(width: Int, height: Int, targetSizePx: Int): Int {
+        val target = targetSizePx.coerceAtLeast(1)
+        var sample = 1
+        var w = width
+        var h = height
+        while (w / 2 >= target && h / 2 >= target) {
+            w /= 2
+            h /= 2
+            sample *= 2
+        }
+        return sample
+    }
+
+    /** Scales an oversized bitmap down to [targetSizePx]; never upscales. */
+    private fun normalize(bitmap: Bitmap, targetSizePx: Int): Bitmap {
+        val longest = max(bitmap.width, bitmap.height)
+        if (longest <= targetSizePx) return bitmap
+        val scale = targetSizePx.toFloat() / longest
+        val scaled = Bitmap.createScaledBitmap(
+            bitmap,
+            (bitmap.width * scale).toInt().coerceAtLeast(1),
+            (bitmap.height * scale).toInt().coerceAtLeast(1),
+            true
+        )
+        if (scaled !== bitmap) bitmap.recycle()
+        return scaled
+    }
+
+    private fun cacheKey(track: Track, targetSizePx: Int, remote: Uri?): String =
+        if (remote != null) "remote_${remote}_$targetSizePx"
+        else "track_${track.id}_${track.albumId}_$targetSizePx"
 
     /**
      * Generates a sleek, high-fidelity dark Aurora atmospheric cover.
@@ -176,7 +287,7 @@ object ArtworkLoader {
         val canvas = Canvas(bitmap)
 
         val hash = abs((title + artist).hashCode())
-        
+
         // Dynamic curated dark aurora palettes
         val colorPalettes = listOf(
             intArrayOf(Color.rgb(15, 10, 28), Color.rgb(45, 18, 72), Color.rgb(184, 116, 255)),
@@ -202,7 +313,7 @@ object ArtworkLoader {
         val glowRadius = sizePx * 0.75f
         val glowCenterX = sizePx * (0.3f + ((hash % 40) / 100f))
         val glowCenterY = sizePx * (0.3f + (((hash / 10) % 40) / 100f))
-        
+
         val radialShader = RadialGradient(
             glowCenterX, glowCenterY, glowRadius,
             intArrayOf(palette[2] and 0x88FFFFFF.toInt(), palette[1] and 0x44FFFFFF.toInt(), Color.TRANSPARENT),

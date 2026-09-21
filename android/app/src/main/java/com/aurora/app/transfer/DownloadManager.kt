@@ -256,6 +256,17 @@ class DownloadManager(
                 if (existingPath == null || File(existingPath).absolutePath != file.absolutePath) {
                     file.delete()
                 }
+                // Backfill the online origin so a favorite keyed by
+                // (source, sourceTrackId) still resolves to this row.
+                if (existing.source.isBlank() && track.trackId.source.isNotBlank()) {
+                    database.trackDao().upsert(
+                        existing.copy(
+                            source = track.trackId.source,
+                            sourceTrackId = track.trackId.value,
+                            updatedAt = System.currentTimeMillis()
+                        )
+                    )
+                }
                 return existing.id
             }
         }
@@ -294,6 +305,10 @@ class DownloadManager(
             localPath = file.absolutePath,
             artworkPath = artworkPath,
             contentHash = hash,
+            // Keep the online origin so the downloaded row and the remote
+            // favorite share one source-aware identity.
+            source = track.trackId.source,
+            sourceTrackId = track.trackId.value,
             createdAt = System.currentTimeMillis(),
             updatedAt = System.currentTimeMillis()
         )

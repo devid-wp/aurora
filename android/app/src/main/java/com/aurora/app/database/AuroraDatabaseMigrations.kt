@@ -64,4 +64,55 @@ object AuroraDatabaseMigrations {
             db.execSQL("CREATE INDEX IF NOT EXISTS index_downloads_status ON downloads(status)")
         }
     }
+
+    /**
+     * Saved online library entries: adds online origin, remote artwork, and
+     * the saved flag. Existing rows are preserved untouched (new columns
+     * default to empty/absent/false).
+     */
+    val MIGRATION_4_5 = object : Migration(4, 5) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE tracks ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE tracks ADD COLUMN source_track_id TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE tracks ADD COLUMN artwork_url TEXT")
+            db.execSQL("ALTER TABLE tracks ADD COLUMN is_saved INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("CREATE INDEX IF NOT EXISTS index_tracks_source_source_track_id ON tracks(source, source_track_id)")
+        }
+    }
+
+    /**
+     * Unified favorites, keyed by a source-aware identity string.
+     *
+     * The old `favorites` table was keyed by track id and carried a foreign key
+     * to `tracks`; it is replaced by a table keyed by `favorite_key`
+     * ("<source>:<sourceTrackId>" for online, "local:<trackId>" for local) with
+     * no foreign key, so a favorite survives its remote row being replaced by a
+     * downloaded local row. Existing rows (if any) migrate as local favorites;
+     * the table was never written by the app, so this is a safe, lossless path.
+     */
+    val MIGRATION_5_6 = object : Migration(5, 6) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS favorites_new (
+                    favorite_key TEXT NOT NULL,
+                    track_id INTEGER NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL DEFAULT '',
+                    source_track_id TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY(favorite_key)
+                )
+                """.trimIndent()
+            )
+            db.execSQL(
+                """
+                INSERT OR IGNORE INTO favorites_new (favorite_key, track_id, created_at)
+                SELECT 'local:' || track_id, track_id, created_at FROM favorites
+                """.trimIndent()
+            )
+            db.execSQL("DROP TABLE favorites")
+            db.execSQL("ALTER TABLE favorites_new RENAME TO favorites")
+            db.execSQL("CREATE INDEX IF NOT EXISTS index_favorites_track_id ON favorites(track_id)")
+        }
+    }
 }

@@ -47,6 +47,23 @@ class LibraryOnlineSaveTest {
     }
 
     @Test
+    fun saved_remote_track_keeps_remote_artwork() {
+        val metadata = SourceMetadata(
+            trackId = SourceTrackId("audius", "track_art"),
+            title = "Art Song",
+            artist = "Artist",
+            album = "Album",
+            durationMs = 120000L,
+            artworkUri = Uri.parse("https://example.com/cover.jpg"),
+            sourceCapabilities = setOf(com.aurora.app.source.SourceCapability.STREAM)
+        )
+        libraryRepository.saveOnlineTrack(metadata)
+
+        val saved = libraryRepository.getSavedOnlineTracks().single()
+        assertEquals("https://example.com/cover.jpg", saved.artworkUri.toString())
+    }
+
+    @Test
     fun unsaved_remote_track_removed_from_library() {
         val metadata = SourceMetadata(
             trackId = SourceTrackId("audius", "track_123"),
@@ -65,7 +82,7 @@ class LibraryOnlineSaveTest {
     }
 
     @Test
-    fun remote_track_is_not_downloaded() {
+    fun remote_track_is_not_counted_as_downloaded() {
         val metadata = SourceMetadata(
             trackId = SourceTrackId("audius", "track_123"),
             title = "Remote Song",
@@ -77,11 +94,11 @@ class LibraryOnlineSaveTest {
         )
 
         libraryRepository.saveOnlineTrack(metadata)
-        
-        // In Aurora, "downloaded" typically means it has a localPath.
-        // getDownloadedTracks in LibraryRepository is currently based on getAuroraTracks,
-        // but I should check if I need to update that implementation.
-        // Wait, current LibraryRepository.getDownloadedTracks() just returns getAuroraTracks().
-        // That's a bug based on the requirements.
+
+        // A saved remote entry is in the library but has no local file, so it
+        // must never be surfaced as a completed download.
+        assertEquals(1, libraryRepository.getAuroraTracks().size)
+        assertTrue(libraryRepository.getDownloadedTracks().isEmpty())
+        assertEquals(1, libraryRepository.getSavedOnlineTracks().size)
     }
 }

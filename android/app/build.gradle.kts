@@ -37,6 +37,13 @@ val soundCloudClientSecret = soundCloudCredential("SOUNDCLOUD_CLIENT_SECRET", "S
 val soundCloudRedirectUri = soundCloudCredential("redirectUri", "SOUNDCLOUD_REDIRECT_URI")
     .ifBlank { "aurora://soundcloud/callback" }
 
+// ── Spotify (Authorization Code + PKCE) ───────────────────────────────────
+// Only the public Client ID is needed: Spotify's Android flow never uses a
+// client secret, so none is read or embedded here.
+val spotifyClientId = soundCloudCredential("SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_ID")
+val spotifyRedirectUri = soundCloudCredential("SPOTIFY_REDIRECT_URI", "SPOTIFY_REDIRECT_URI")
+    .ifBlank { "aurora://spotify/callback" }
+
 android {
     namespace = "com.aurora.app"
     compileSdk = 35
@@ -66,6 +73,9 @@ android {
             // Optional Audius developer key (x-api-key header). Empty by default:
             // public catalog reads work without user sign-in.
             buildConfigField("String", "AUDIUS_API_KEY", gradleStringLiteral(soundCloudCredential("AUDIUS_API_KEY", "AUDIUS_API_KEY")))
+            // Public Spotify Client ID (never a secret); empty disables Spotify.
+            buildConfigField("String", "SPOTIFY_CLIENT_ID", gradleStringLiteral(spotifyClientId))
+            buildConfigField("String", "SPOTIFY_REDIRECT_URI", gradleStringLiteral(spotifyRedirectUri))
         }
         release {
             isMinifyEnabled = false
@@ -73,6 +83,8 @@ android {
             buildConfigField("String", "SOUNDCLOUD_CLIENT_SECRET", gradleStringLiteral(soundCloudClientSecret))
             buildConfigField("String", "SOUNDCLOUD_REDIRECT_URI", gradleStringLiteral(soundCloudRedirectUri))
             buildConfigField("String", "AUDIUS_API_KEY", gradleStringLiteral(soundCloudCredential("AUDIUS_API_KEY", "AUDIUS_API_KEY")))
+            buildConfigField("String", "SPOTIFY_CLIENT_ID", gradleStringLiteral(spotifyClientId))
+            buildConfigField("String", "SPOTIFY_REDIRECT_URI", gradleStringLiteral(spotifyRedirectUri))
         }
     }
 

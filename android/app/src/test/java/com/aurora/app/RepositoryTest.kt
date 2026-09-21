@@ -46,8 +46,8 @@ class RepositoryTest {
         libraryRepository.syncMediaStoreTracks(tracks)
         assertEquals(2, libraryRepository.getAllTracks().size)
 
-        favoriteRepository.add(20L)
-        assertTrue(favoriteRepository.isFavorite(20L))
+        favoriteRepository.add(tracks[0])
+        assertTrue(favoriteRepository.isFavorite(tracks[0]))
 
         historyRepository.recordPlay(20L, 5000L)
         assertEquals(1, historyRepository.getRecent(10).size)

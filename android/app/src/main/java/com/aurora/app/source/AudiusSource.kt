@@ -7,24 +7,6 @@ import java.net.URLEncoder
 
 /**
  * Audius integration built against the official Audius REST API.
- *
- * Reference material (the only endpoints and shapes used here):
- *  - Docs: https://docs.audius.co/
- *  - API base: https://api.audius.co/v1 (stable entry; the old
- *    discoveryprovider host is deprecated, so no host discovery is needed)
- *  - Machine-readable contract: https://api.audius.co/v1/swagger.yaml
- *
- * Endpoints used:
- *   GET {api}/v1/tracks/search?query=..&limit=..   search (`{"data":[...]}`)
- *   GET {api}/v1/tracks/{track_id}                  track lookup (`{"data":{...}}`)
- *   GET {api}/v1/tracks/{track_id}/stream?no_redirect=true
- *     stream URL as JSON (`{"data":"https://..."}`); the signed URL expires,
- *     so it is resolved fresh on every play and never persisted.
- *
- * Authentication is an `x-api-key` header when a developer key is bundled
- * (BuildConfig, empty by default). Public catalog reads work without user
- * sign-in, so Audius is an online streaming source: STREAM capability only,
- * downloads are never offered.
  */
 internal const val AUDIUS_API_BASE = "https://api.audius.co/v1"
 
@@ -50,8 +32,6 @@ class AudiusSource(
         return "$base?$joined"
     }
 
-    // ── MusicSource: search ───────────────────────────────────────────────
-
     override fun search(query: String): List<SourceMetadata> {
         return when (val outcome = searchDetailed(query)) {
             is SourceSearchResult.Success -> outcome.results
@@ -59,11 +39,6 @@ class AudiusSource(
         }
     }
 
-    /**
-     * Detailed search that surfaces the real outcome (network failure, HTTP
-     * error, malformed response, empty, or success) so the UI never silently
-     * shows an empty list when something actually failed.
-     */
     override fun searchDetailed(query: String): SourceSearchResult {
         if (query.isBlank()) return SourceSearchResult.Empty()
         val url = apiUrl("/tracks/search", linkedMapOf(
@@ -100,8 +75,6 @@ class AudiusSource(
         }
     }
 
-    // ── MusicSource: track lookup ─────────────────────────────────────────
-
     override fun getTrack(id: SourceTrackId): SourceMetadata? {
         if (id.source != sourceId || id.value.isBlank()) return null
         val raw = try {
@@ -117,8 +90,6 @@ class AudiusSource(
             null
         }
     }
-
-    // ── MusicSource: streaming ────────────────────────────────────────────
 
     override fun stream(track: SourceMetadata): StreamResult {
         if (track.sourceCapabilities.contains(SourceCapability.BLOCKED)) {
@@ -137,11 +108,6 @@ class AudiusSource(
         return StreamResult(uri = resolved, metadata = track.copy(localUri = resolved), isPreview = false)
     }
 
-    /**
-     * Resolves a fresh signed stream URL via `no_redirect=true` (JSON
-     * `{"data":"https://..."}`). The URL carries an expiring signature, so it
-     * is never cached or persisted — every play resolves it again.
-     */
     private fun resolveStreamUrl(track: SourceMetadata): Uri? {
         val url = apiUrl("/tracks/${track.trackId.value}/stream", linkedMapOf("no_redirect" to "true"))
         val raw = try {
@@ -158,30 +124,23 @@ class AudiusSource(
         }
     }
 
-    // ── MusicSource: downloads (never offered for Audius) ─────────────────
-
     override fun checkDownloadAvailability(track: SourceMetadata): DownloadCapability =
         DownloadCapability(DownloadAvailability.UNAVAILABLE, "Audius tracks stream online only — downloads are not offered")
 
     override fun download(track: SourceMetadata, targetDir: File): DownloadResult =
         DownloadResult(success = false, error = "Audius tracks stream online only — downloads are not offered")
 
-    // ── Response parsing ──────────────────────────────────────────────────
-
-    /** Extracts track object texts from a `{"data":[...]}` collection response. */
     private fun extractTrackObjects(rawJson: String): List<String> {
         val array = extractDataValue(rawJson)?.trim() ?: return emptyList()
         if (!array.startsWith("[")) return emptyList()
         return splitTopLevelObjects(array)
     }
 
-    /** Extracts the single track object from a `{"data":{...}}` response. */
     private fun extractSingleTrackObject(rawJson: String): String? {
         val value = extractDataValue(rawJson)?.trim() ?: return null
         return if (value.startsWith("{")) value else null
     }
 
-    /** Returns the raw JSON value of the top-level `data` key (object or array). */
     private fun extractDataValue(rawJson: String): String? {
         val match = Regex("\"data\"\\s*:\\s*").find(rawJson) ?: return null
         val start = match.range.last + 1
@@ -251,13 +210,6 @@ class AudiusSource(
         return result
     }
 
-    /**
-     * Maps an Audius track object to [SourceMetadata].
-     *
-     * Availability is read from the real flags: deleted, unlisted,
-     * unavailable, non-streamable, or stream-gated tracks are BLOCKED
-     * (metadata only); everything else streams.
-     */
     private fun metadataForTrackObject(rawJson: String): SourceMetadata? {
         val id = extractJsonString(rawJson, "id")
             .ifBlank { extractJsonLong(rawJson, "track_id").takeIf { it > 0L }?.toString().orEmpty() }
@@ -272,13 +224,14 @@ class AudiusSource(
         }.ifBlank { "Unknown artist" }
 
         val album = extractJsonString(rawJson, "genre").ifBlank { "Audius" }
-        // Audius reports duration in whole seconds.
         val durationMs = extractJsonLong(rawJson, "duration").coerceAtLeast(0L) * 1000L
         val artworkObject = extractJsonObject(rawJson, "artwork")
-        val art = resolveArtworkUrl(
-            extractJsonString(artworkObject, "480x480")
-                .ifBlank { extractJsonString(artworkObject, "150x150") }
-        )
+        
+        // Priority: 1000x1000 -> 480x480 -> 150x150
+        val artUrl = extractJsonString(artworkObject, "1000x1000")
+            .ifBlank { extractJsonString(artworkObject, "480x480") }
+            .ifBlank { extractJsonString(artworkObject, "150x150") }
+        val art = resolveArtworkUrl(artUrl)
 
         val blocked = extractJsonBoolean(rawJson, "is_delete") ||
             (hasJsonKey(rawJson, "is_available") && !extractJsonBoolean(rawJson, "is_available")) ||

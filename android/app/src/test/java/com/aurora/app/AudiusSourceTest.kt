@@ -120,7 +120,7 @@ class AudiusSourceTest {
         // Audius reports whole seconds; Aurora works in milliseconds.
         assertEquals(185000L, track.durationMs)
         assertEquals("Electronic", track.album)
-        assertEquals("https://v.monophonic.digital/content/ABC/480x480.jpg", track.artworkUri.toString())
+        assertEquals("https://v.monophonic.digital/content/ABC/1000x1000.jpg", track.artworkUri.toString())
         assertEquals(setOf(SourceCapability.STREAM), track.sourceCapabilities)
     }
 

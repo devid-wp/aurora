@@ -163,25 +163,41 @@ class LibraryRepository(private val database: AuroraDatabase) {
                 durationMs = entity.durationMs,
                 artworkUri = entity.artworkUrl?.takeIf { it.isNotBlank() }?.let { runCatching { android.net.Uri.parse(it) }.getOrNull() },
                 localUri = null,
-                sourceCapabilities = setOf(com.aurora.app.source.SourceCapability.STREAM)
+                sourceCapabilities = com.aurora.app.source.capabilitiesForOnlineSource(entity.source),
+                externalUri = com.aurora.app.source.externalUriForOnlineSource(entity.source, entity.sourceTrackId)
             )
         }
+}
 
-    private fun TrackEntity.toTrack(): Track {
-        val resolvedUri = if (!localPath.isNullOrBlank() && File(localPath).exists()) {
-            Uri.fromFile(File(localPath))
-        } else {
-            uri.takeIf { it.isNotBlank() }?.let(Uri::parse) ?: Uri.EMPTY
-        }
-
-        return Track(
-            id = id,
-            title = title,
-            artist = artist,
-            album = album,
-            duration = durationMs,
-            uri = resolvedUri,
-            albumId = albumId ?: 0L
-        )
+/**
+ * Maps a stored track row to the UI/playback [Track] model, preserving its
+ * source identity so favorites resolve consistently everywhere.
+ */
+internal fun TrackEntity.toTrack(): Track {
+    val resolvedUri = if (!localPath.isNullOrBlank() && File(localPath).exists()) {
+        Uri.fromFile(File(localPath))
+    } else {
+        uri.takeIf { it.isNotBlank() }?.let(Uri::parse) ?: Uri.EMPTY
     }
+
+    // Prefer a real cover file on disk, then a remote cover URL (online
+    // sources). Null keeps the existing fallback chain (MediaStore tags /
+    // embedded art / generative Aurora cover).
+    val resolvedArtwork = artworkPath?.takeIf { it.isNotBlank() }
+        ?.let { File(it) }?.takeIf { it.exists() }?.let(Uri::fromFile)
+        ?: artworkUrl?.takeIf { it.isNotBlank() }
+            ?.let { runCatching { Uri.parse(it) }.getOrNull() }
+
+    return Track(
+        id = id,
+        title = title,
+        artist = artist,
+        album = album,
+        duration = durationMs,
+        uri = resolvedUri,
+        albumId = albumId ?: 0L,
+        artworkUri = resolvedArtwork,
+        source = source,
+        sourceTrackId = sourceTrackId
+    )
 }

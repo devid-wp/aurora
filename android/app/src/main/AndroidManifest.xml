@@ -20,6 +20,11 @@
     <!-- Network access for the SoundCloud API and stream/download URLs -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Required by the audio system for the equalizer audio effect and for
+         generating the player audio session it is attached to. Normal
+         permission: no runtime prompt. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
     <queries>
         <!-- Reveal other apps that can open the SoundCloud authorization URL -->
         <intent>
@@ -51,6 +56,17 @@
                 <data
                     android:scheme="aurora"
                     android:host="soundcloud"
+                    android:pathPrefix="/callback" />
+            </intent-filter>
+
+            <!-- Spotify OAuth callback (Authorization Code + PKCE): aurora://spotify/callback -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="aurora"
+                    android:host="spotify"
                     android:pathPrefix="/callback" />
             </intent-filter>
         </activity>

@@ -32,7 +32,7 @@ import com.aurora.app.database.entities.TrackEntity
         RecentlyPlayedEntity::class,
         DownloadEntity::class
     ],
-    version = 4,
+    version = 6,
     exportSchema = false
 )
 abstract class AuroraDatabase : RoomDatabase() {
@@ -59,7 +59,9 @@ abstract class AuroraDatabase : RoomDatabase() {
                     .addMigrations(
                         AuroraDatabaseMigrations.MIGRATION_1_2,
                         AuroraDatabaseMigrations.MIGRATION_2_3,
-                        AuroraDatabaseMigrations.MIGRATION_3_4
+                        AuroraDatabaseMigrations.MIGRATION_3_4,
+                        AuroraDatabaseMigrations.MIGRATION_4_5,
+                        AuroraDatabaseMigrations.MIGRATION_5_6
                     )
                     .fallbackToDestructiveMigration()
                     .build()

@@ -101,4 +101,113 @@ class LibraryOnlineSaveTest {
         assertTrue(libraryRepository.getDownloadedTracks().isEmpty())
         assertEquals(1, libraryRepository.getSavedOnlineTracks().size)
     }
+
+    @Test
+    fun saved_remote_track_persists_source_identity_and_stable_id() {
+        val metadata = SourceMetadata(
+            trackId = SourceTrackId("audius", "track_stable"),
+            title = "Stable Song",
+            artist = "Artist",
+            album = "Album",
+            durationMs = 200000L,
+            sourceCapabilities = setOf(com.aurora.app.source.SourceCapability.STREAM)
+        )
+
+        val id = libraryRepository.saveOnlineTrack(metadata)
+
+        val row = libraryRepository.getTrack(id)!!
+        assertEquals("audius", row.source)
+        assertEquals("track_stable", row.sourceTrackId)
+        assertEquals(com.aurora.app.source.stableSourceTrackId("audius", "track_stable"), row.id)
+        assertTrue(row.isSaved)
+        assertTrue(row.localPath == null)
+    }
+
+    @Test
+    fun saved_downloadable_track_exposes_download_capability() {
+        val metadata = SourceMetadata(
+            trackId = SourceTrackId("audius", "track_dl"),
+            title = "Downloadable",
+            artist = "Artist",
+            album = "Album",
+            durationMs = 200000L,
+            sourceCapabilities = setOf(
+                com.aurora.app.source.SourceCapability.STREAM,
+                com.aurora.app.source.SourceCapability.DOWNLOAD
+            )
+        )
+
+        val id = libraryRepository.saveOnlineTrack(metadata)
+
+        assertTrue(libraryRepository.getTrack(id)!!.downloadPermitted)
+        val savedMeta = libraryRepository.getSavedOnlineMetadata().getValue(id)
+        assertTrue(savedMeta.sourceCapabilities.contains(com.aurora.app.source.SourceCapability.DOWNLOAD))
+    }
+
+    @Test
+    fun saved_stream_only_track_has_no_download_capability() {
+        val metadata = SourceMetadata(
+            trackId = SourceTrackId("audius", "track_stream"),
+            title = "Stream Only",
+            artist = "Artist",
+            album = "Album",
+            durationMs = 200000L,
+            sourceCapabilities = setOf(com.aurora.app.source.SourceCapability.STREAM)
+        )
+
+        val id = libraryRepository.saveOnlineTrack(metadata)
+
+        assertFalse(libraryRepository.getTrack(id)!!.downloadPermitted)
+        val savedMeta = libraryRepository.getSavedOnlineMetadata().getValue(id)
+        assertFalse(savedMeta.sourceCapabilities.contains(com.aurora.app.source.SourceCapability.DOWNLOAD))
+    }
+
+    @Test
+    fun refresh_saved_metadata_updates_download_flag_without_resetting_file() {
+        val metadata = SourceMetadata(
+            trackId = SourceTrackId("audius", "track_refresh"),
+            title = "Refresh",
+            artist = "Artist",
+            album = "Album",
+            durationMs = 200000L,
+            sourceCapabilities = setOf(com.aurora.app.source.SourceCapability.STREAM)
+        )
+        val id = libraryRepository.saveOnlineTrack(metadata)
+        assertFalse(libraryRepository.getTrack(id)!!.downloadPermitted)
+
+        val nowDownloadable = metadata.copy(
+            sourceCapabilities = setOf(
+                com.aurora.app.source.SourceCapability.STREAM,
+                com.aurora.app.source.SourceCapability.DOWNLOAD
+            )
+        )
+        assertTrue(libraryRepository.refreshSavedOnlineMetadata(nowDownloadable))
+
+        val row = libraryRepository.getTrack(id)!!
+        assertTrue(row.downloadPermitted)
+        assertEquals(metadata.title, row.title)
+    }
+
+    @Test
+    fun saved_entry_with_local_copy_is_excluded_from_visible_library() {
+        val metadata = SourceMetadata(
+            trackId = SourceTrackId("audius", "track_dup"),
+            title = "Dup",
+            artist = "Artist",
+            album = "Album",
+            durationMs = 200000L,
+            sourceCapabilities = setOf(com.aurora.app.source.SourceCapability.STREAM)
+        )
+        val savedId = libraryRepository.saveOnlineTrack(metadata)
+
+        val superseded = com.aurora.app.database.repositories.supersededSavedOnlineIds(
+            savedMetadata = libraryRepository.getSavedOnlineMetadata(),
+            downloads = emptyList(),
+            localCopySourceKeys = setOf("audius" to "track_dup")
+        )
+
+        val visible = libraryRepository.getAuroraTracksExcluding(superseded)
+        assertTrue("superseded saved entry must be hidden", superseded.contains(savedId))
+        assertTrue(visible.none { it.id == savedId })
+    }
 }

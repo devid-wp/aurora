@@ -7,6 +7,8 @@ android/.gradle/
 android/build/
 android/app/build/
 android/local.properties
+# SoundCloud app credentials (never commit real secrets)
+android/soundcloud.properties
 android/captures/
 android/.idea/
 android/.kotlin/

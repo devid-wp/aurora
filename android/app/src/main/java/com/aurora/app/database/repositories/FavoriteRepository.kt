@@ -130,8 +130,13 @@ class FavoriteRepository(private val database: AuroraDatabase) {
     fun clearAll(): Int = favoriteDao.clearAll()
 
     private fun ensureLibraryEntry(track: Track, metadata: SourceMetadata?) {
-        if (trackDao.getBySource(track.source, track.sourceTrackId) != null) return
-        libraryRepository.saveOnlineTrack(metadata ?: metadataFromTrack(track))
+        if (trackDao.getBySource(track.source, track.sourceTrackId) == null) {
+            libraryRepository.saveOnlineTrack(metadata ?: metadataFromTrack(track))
+        } else if (metadata != null) {
+            // Keep a saved entry's capability/artwork current without resetting
+            // its local file or original save time.
+            libraryRepository.refreshSavedOnlineMetadata(metadata)
+        }
     }
 
     private fun metadataFromTrack(track: Track): SourceMetadata = SourceMetadata(

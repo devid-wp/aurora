@@ -17,6 +17,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.File
 
 /**
  * Unit tests for the Audius online source.
@@ -60,6 +61,34 @@ class AudiusSourceTest {
     private fun streamJson(url: String = "https://v.monophonic.digital/tracks/cidstream/ABC?signature=xyz"): String =
         """{"data": "$url"}"""
 
+    /** Artist enabled downloads and the current user has access. */
+    private fun downloadableTrackJson(id: String = "dl1"): String = """
+        {"id": "$id", "title": "Free Download", "duration": 200, "genre": "House",
+         "is_streamable": true, "is_available": true, "is_delete": false,
+         "is_unlisted": false, "is_downloadable": true, "is_download_gated": false,
+         "is_stream_gated": false,
+         "access": {"stream": true, "download": true},
+         "artwork": {"150x150": "https://cdn/150x150.jpg"},
+         "user": {"handle": "artist", "name": "Artist"}}
+    """.trimIndent()
+
+    /** Artist enabled downloads but the current user is gated out. */
+    private fun gatedDownloadTrackJson(id: String = "gate1"): String = """
+        {"id": "$id", "title": "Gated", "duration": 200, "genre": "House",
+         "is_streamable": true, "is_available": true, "is_delete": false,
+         "is_unlisted": false, "is_downloadable": true, "is_download_gated": true,
+         "is_stream_gated": false,
+         "access": {"stream": true, "download": false},
+         "user": {"handle": "artist", "name": "Artist"}}
+    """.trimIndent()
+
+    /** No download flags at all (older shape): download must stay unavailable. */
+    private fun unknownDownloadTrackJson(id: String = "unk1"): String = """
+        {"id": "$id", "title": "Unknown", "duration": 200,
+         "is_streamable": true, "is_available": true,
+         "user": {"handle": "artist", "name": "Artist"}}
+    """.trimIndent()
+
     private fun source(client: FakeAudiusHttp, apiKey: String = ""): AudiusSource = AudiusSource(
         apiKeyProvider = { apiKey },
         httpClient = client
@@ -77,6 +106,8 @@ class AudiusSourceTest {
     private class FakeAudiusHttp : SoundCloudHttpClient {
         val getRequests = mutableListOf<Pair<String, Map<String, String>>>()
         val textResponses = mutableMapOf<String, SoundCloudResponse>()
+        val byteResponses = mutableMapOf<String, SoundCloudResponse>()
+        val byteRequests = mutableListOf<Pair<String, Map<String, String>>>()
         var forcedGet: SoundCloudResponse? = null
 
         override fun get(url: String, headers: Map<String, String>): SoundCloudResponse {
@@ -88,8 +119,13 @@ class AudiusSourceTest {
                 ?.value ?: SoundCloudResponse(404, body = "{\"error\":\"not found\"}")
         }
 
-        override fun getBytes(url: String, headers: Map<String, String>): SoundCloudResponse =
-            SoundCloudResponse(404, body = "{\"error\":\"not found\"}")
+        override fun getBytes(url: String, headers: Map<String, String>): SoundCloudResponse {
+            byteRequests.add(url to headers)
+            return byteResponses.entries
+                .sortedByDescending { it.key.length }
+                .firstOrNull { url.contains(it.key) }
+                ?.value ?: SoundCloudResponse(404, body = "{\"error\":\"not found\"}")
+        }
 
         override fun post(url: String, headers: Map<String, String>): SoundCloudResponse =
             SoundCloudResponse(404, body = "{\"error\":\"not found\"}")
@@ -280,21 +316,118 @@ class AudiusSourceTest {
         assertTrue(client.getRequests.none { it.first.contains("/stream") })
     }
 
-    // ── Downloads are never offered ───────────────────────────────────────
+    // ── Downloads follow the official access flags ────────────────────────
 
     @Test
-    fun download_is_not_offered_for_audius() {
+    fun stream_only_track_is_not_downloadable() {
         val src = source(FakeAudiusHttp())
 
         val capability = src.checkDownloadAvailability(playableMetadata())
         assertEquals(DownloadAvailability.UNAVAILABLE, capability.availability)
 
-        val tmp = createTempDir("audius-dl")
+        val dir = tempDir()
         try {
-            val result = src.download(playableMetadata(), tmp)
-            assertFalse(result.success)
+            assertFalse(src.download(playableMetadata(), dir).success)
         } finally {
-            tmp.deleteRecursively()
+            dir.deleteRecursively()
         }
     }
+
+    @Test
+    fun explicitly_downloadable_track_carries_download_capability() {
+        val src = source(FakeAudiusHttp().apply {
+            textResponses["/tracks/search"] = SoundCloudResponse(200, body = collectionSearch(downloadableTrackJson()))
+        })
+
+        val track = (src.searchDetailed("free") as SourceSearchResult.Success).results.single()
+
+        assertEquals(setOf(SourceCapability.STREAM, SourceCapability.DOWNLOAD), track.sourceCapabilities)
+        assertEquals(DownloadAvailability.AVAILABLE, src.checkDownloadAvailability(track).availability)
+    }
+
+    @Test
+    fun download_gated_track_is_not_downloadable() {
+        val client = FakeAudiusHttp().apply {
+            textResponses["/tracks/search"] = SoundCloudResponse(200, body = collectionSearch(gatedDownloadTrackJson()))
+        }
+        val src = source(client)
+
+        val track = (src.searchDetailed("gated") as SourceSearchResult.Success).results.single()
+
+        assertFalse(track.sourceCapabilities.contains(SourceCapability.DOWNLOAD))
+        assertEquals(DownloadAvailability.UNAVAILABLE, src.checkDownloadAvailability(track).availability)
+        val dir = tempDir()
+        try {
+            assertFalse(src.download(track, dir).success)
+        } finally {
+            dir.deleteRecursively()
+        }
+        assertTrue("gated download must never hit the download endpoint",
+            client.byteRequests.none { it.first.contains("/download") })
+    }
+
+    @Test
+    fun unknown_download_access_is_not_downloadable() {
+        val client = FakeAudiusHttp().apply {
+            textResponses["/tracks/search"] = SoundCloudResponse(200, body = collectionSearch(unknownDownloadTrackJson()))
+        }
+        val src = source(client)
+
+        val track = (src.searchDetailed("unknown") as SourceSearchResult.Success).results.single()
+
+        assertFalse(track.sourceCapabilities.contains(SourceCapability.DOWNLOAD))
+        assertEquals(DownloadAvailability.UNAVAILABLE, src.checkDownloadAvailability(track).availability)
+    }
+
+    @Test
+    fun download_rechecks_live_permission_before_fetching() {
+        val client = FakeAudiusHttp().apply {
+            textResponses["/tracks/search"] = SoundCloudResponse(200, body = collectionSearch(downloadableTrackJson()))
+            // The live lookup later reports the track is no longer downloadable.
+            textResponses["/tracks/dl1"] = SoundCloudResponse(200, body = singleTrack(playableTrackJson("dl1")))
+        }
+        val src = source(client)
+        val track = (src.searchDetailed("free") as SourceSearchResult.Success).results.single()
+
+        val dir = tempDir()
+        try {
+            assertFalse(src.download(track, dir).success)
+        } finally {
+            dir.deleteRecursively()
+        }
+        assertTrue("a revoked track must not be fetched",
+            client.byteRequests.none { it.first.contains("/download") })
+    }
+
+    @Test
+    fun download_uses_official_endpoint_and_writes_file() {
+        val client = FakeAudiusHttp().apply {
+            textResponses["/tracks/search"] = SoundCloudResponse(200, body = collectionSearch(downloadableTrackJson()))
+            textResponses["/tracks/dl1"] = SoundCloudResponse(200, body = singleTrack(downloadableTrackJson()))
+            byteResponses["/tracks/dl1/download"] = SoundCloudResponse(
+                statusCode = 200,
+                bytes = "downloaded-audio".toByteArray(),
+                contentType = "audio/mpeg"
+            )
+        }
+        val src = source(client)
+        val track = (src.searchDetailed("free") as SourceSearchResult.Success).results.single()
+
+        val dir = tempDir()
+        try {
+            val result = src.download(track, dir)
+
+            assertTrue(result.success)
+            val file = File(result.localPath!!)
+            assertTrue(file.exists())
+            assertEquals("downloaded-audio", file.readText())
+            assertTrue(result.localPath.endsWith(".mp3"))
+            assertTrue("the official download endpoint must be used",
+                client.byteRequests.any { it.first.contains("/tracks/dl1/download") })
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    private fun tempDir(): File = kotlin.io.path.createTempDirectory("audius-dl").toFile()
 }

@@ -163,7 +163,11 @@ Audius
   it is sent as the `x-api-key` header when present and stays empty otherwise
 - stream URLs are signed and expiring: resolved fresh on every play via
   `GET /v1/tracks/{id}/stream?no_redirect=true`, never persisted
-- downloads are never offered for Audius tracks (streaming source only)
+- downloads are offered only when the track object explicitly grants them
+  (`is_downloadable` **and** `access.download`, and not download-gated). The file
+  is fetched through the official `GET /v1/tracks/{id}/download` endpoint and
+  stored in Aurora-owned storage; a download URL is never derived from the
+  stream URL, and missing/unknown permission means "not downloadable"
 
 SoundCloud
 - optional; requires configured credentials (see SoundCloud setup above)

@@ -153,8 +153,6 @@ class MainActivity : Activity() {
     private var downloadedTrackIds: Set<Long> = emptySet()
     /** Saved online library entries by track id (fresh stream resolved per play). */
     private var savedOnlineMeta: Map<Long, SourceMetadata> = emptyMap()
-    /** Online source metadata behind the currently playing remote track, if any. */
-    private var currentOnlineMetadata: SourceMetadata? = null
     private var activeDownloadView = false
     private var libraryNeedsRefresh = false
 
@@ -654,29 +652,26 @@ class MainActivity : Activity() {
                 // Aurora-owned library only: explicit user imports + explicit
                 // Aurora downloads + explicitly saved online entries. Phone
                 // music is never auto-adopted.
-                val auroraTracks = libraryRepository.getAuroraTracks()
-                val savedOnline = libraryRepository.getSavedOnlineTracks()
-                // A download that completed for a saved entry is file-backed;
-                // the file row (if any) wins over the remote entry. Downloads
-                // create their own content-hash row, so also match the saved
-                // entry by its (source, sourceTrackId) identity to avoid
-                // showing the same track twice (Online + Downloaded).
                 val completedDownloads = downloadRepository.getAll()
                     .filter { it.status == "completed" }
-                val downloadedIds = completedDownloads
-                    .mapNotNull { it.trackId }
-                    .toSet()
-                downloadedTrackIds = downloadedIds
+                downloadedTrackIds = completedDownloads.mapNotNull { it.trackId }.toSet()
+                // A saved remote entry is superseded (hidden) once a verified
+                // local file carries the same (source, sourceTrackId) origin —
+                // by a completed job or by the file itself, so removing the job
+                // never resurfaces a duplicate Online row.
                 val allSavedMeta = libraryRepository.getSavedOnlineMetadata()
-                val supersededSavedIds = com.aurora.app.database.repositories
-                    .supersededSavedOnlineIds(allSavedMeta, completedDownloads)
+                val supersededSavedIds = com.aurora.app.database.repositories.supersededSavedOnlineIds(
+                    allSavedMeta,
+                    completedDownloads,
+                    libraryRepository.getDownloadedSourceKeys()
+                )
                 savedOnlineMeta = allSavedMeta - supersededSavedIds
-                val visibleSaved = savedOnline.filter {
-                    it.id !in downloadedIds && it.id !in supersededSavedIds
-                }
+                // getAuroraTracksExcluding already contains the saved entries,
+                // so they are listed exactly once.
+                val visibleTracks = libraryRepository.getAuroraTracksExcluding(supersededSavedIds)
                 runOnUiThread {
                     favoriteKeys = favorites
-                    onTracksLoaded(auroraTracks + visibleSaved)
+                    onTracksLoaded(visibleTracks)
                 }
             } catch (e: Exception) {
                 runOnUiThread { showLibraryError(e.message ?: "Could not load your library.") }
@@ -1822,9 +1817,12 @@ class MainActivity : Activity() {
             val localCopy: File? = if (isLocal) {
                 metadata.localPath?.let { File(it) }?.takeIf { it.exists() }
             } else {
+                // Match by stable source identity, never by title/artist, so a
+                // different song that happens to share a title is not treated
+                // as already downloaded and a real local copy is always found.
                 localIndex.firstOrNull {
-                    it.title.equals(metadata.title, ignoreCase = true) &&
-                        (metadata.artist.isBlank() || it.artist.equals(metadata.artist, ignoreCase = true))
+                    it.source == metadata.trackId.source &&
+                        it.sourceTrackId == metadata.trackId.value
                 }?.localPath?.let { File(it) }?.takeIf { it.exists() }
             }
             val downloaded = localCopy != null
@@ -2283,19 +2281,46 @@ class MainActivity : Activity() {
             .show()
     }
 
+    /**
+     * Downloads a saved online library entry through its own source. The live
+     * track is re-fetched so availability reflects the source's current access
+     * flags rather than a persisted snapshot; an unavailable source is reported
+     * honestly instead of queueing an impossible transfer.
+     */
     private fun downloadRemoteTrack(metadata: SourceMetadata) {
+        val source: MusicSource = sourceForId(metadata.trackId.source)
         Thread {
-            val capability = soundCloudSource.checkDownloadAvailability(metadata)
+            // Require live metadata: without it Aurora cannot honestly confirm
+            // the source still permits a download (e.g. while offline).
+            val live = try {
+                source.getTrack(metadata.trackId)
+            } catch (_: Exception) {
+                null
+            }
+            if (live == null) {
+                runOnUiThread {
+                    Toast.makeText(this, "Track details are unavailable right now — check your connection.", Toast.LENGTH_SHORT).show()
+                }
+                return@Thread
+            }
+            val capability = try {
+                source.checkDownloadAvailability(live)
+            } catch (e: Exception) {
+                com.aurora.app.source.DownloadCapability(
+                    DownloadAvailability.BLOCKED,
+                    e.message ?: "Unavailable"
+                )
+            }
             if (capability.availability != DownloadAvailability.AVAILABLE) {
                 runOnUiThread {
-                    val reason = capability.reason.ifBlank { "This track is not officially downloadable from SoundCloud." }
+                    val reason = capability.reason.ifBlank { "This track is not officially downloadable." }
                     Toast.makeText(this, "Download unavailable — $reason", Toast.LENGTH_SHORT).show()
                 }
                 return@Thread
             }
-            downloadManager.queue(soundCloudSource, metadata)
+            downloadManager.queue(source, live)
             runOnUiThread {
-                Toast.makeText(this, "Download queued: ${metadata.title}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Download queued: ${live.title}", Toast.LENGTH_SHORT).show()
             }
         }.start()
     }
@@ -2498,7 +2523,7 @@ class MainActivity : Activity() {
                 TrackFilter.ALL -> "No tracks" to "Import music files or download tracks to start your Aurora collection."
                 TrackFilter.LOCAL -> "No imported tracks" to "Music files you explicitly import into Aurora appear here."
                 TrackFilter.DOWNLOADED -> "No downloaded tracks" to "Tracks you import or download into Aurora appear here."
-                TrackFilter.ONLINE -> "No online tracks" to "SoundCloud tracks saved to your library appear here."
+                TrackFilter.ONLINE -> "No online tracks" to "Online tracks you save to your library appear here."
             }
             container.addView(buildStateCard(title, message, false))
             return
@@ -3357,8 +3382,7 @@ class MainActivity : Activity() {
         index: Int,
         compact: Boolean,
         source: String = "Local",
-        sourceMetadata: SourceMetadata? = null,
-        canDownload: Boolean = false
+        sourceMetadata: SourceMetadata? = null
     ): LinearLayout {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -3444,37 +3468,31 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        if (source == "SoundCloud" && sourceMetadata != null) {
-            val actionText = if (canDownload) "Download" else "Unavailable"
-            val actionBtn = TextView(this).apply {
-                text = actionText
-                setTextColor(if (canDownload) purple else textMuted)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-                setPadding(dp(10), dp(6), dp(10), dp(6))
-                background = rounded(surface, 10)
-                isClickable = true
-                isFocusable = true
-                foreground = ripple()
-                setOnClickListener {
-                    if (canDownload) downloadRemoteTrack(sourceMetadata)
+        val onlineSourceId = sourceMetadata?.trackId?.source
+        if (sourceMetadata != null && !onlineSourceId.isNullOrBlank() && onlineSourceId != localSource.sourceId) {
+            val sourceSupportsDownload = sourceForId(onlineSourceId).capabilities.contains(SourceCapability.DOWNLOAD)
+            if (sourceSupportsDownload) {
+                // The per-track permission comes from the saved entry's last
+                // known capability; the download itself re-checks the live
+                // source before transferring anything.
+                val canDownload = sourceMetadata.sourceCapabilities.contains(SourceCapability.DOWNLOAD)
+                val actionBtn = TextView(this).apply {
+                    text = if (canDownload) "Download" else "Unavailable"
+                    setTextColor(if (canDownload) purple else textMuted)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                    setPadding(dp(10), dp(6), dp(10), dp(6))
+                    background = rounded(surface, 10)
+                    isClickable = canDownload
+                    isFocusable = canDownload
+                    if (canDownload) {
+                        foreground = ripple()
+                        setOnClickListener { downloadRemoteTrack(sourceMetadata) }
+                    }
+                    contentDescription = if (canDownload) "Download ${track.title}" else "Download unavailable"
                 }
-                contentDescription = "Download remote track"
+                actions.addView(actionBtn)
             }
-            actions.addView(actionBtn)
-        } else if (source == "Audius" && sourceMetadata != null) {
-            val actionBtn = TextView(this).apply {
-                text = "Unavailable"
-                setTextColor(textMuted)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-                setPadding(dp(10), dp(6), dp(10), dp(6))
-                background = rounded(surface, 10)
-                isClickable = false
-                isFocusable = false
-                contentDescription = "Audius download unavailable"
-            }
-            actions.addView(actionBtn)
         }
 
         val heart = ImageView(this).apply {

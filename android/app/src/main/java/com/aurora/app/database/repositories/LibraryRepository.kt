@@ -128,6 +128,7 @@ class LibraryRepository(private val database: AuroraDatabase) {
                 sourceTrackId = metadata.trackId.value,
                 artworkUrl = metadata.artworkUri?.toString(),
                 isSaved = true,
+                downloadPermitted = metadata.sourceCapabilities.contains(com.aurora.app.source.SourceCapability.DOWNLOAD),
                 createdAt = now,
                 updatedAt = now
             )
@@ -155,6 +156,8 @@ class LibraryRepository(private val database: AuroraDatabase) {
     /** Saved online entries as playable source metadata (fresh stream per play). */
     fun getSavedOnlineMetadata(): Map<Long, com.aurora.app.source.SourceMetadata> =
         trackDao.getSavedOnline().associate { entity ->
+            val capabilities = com.aurora.app.source.capabilitiesForOnlineSource(entity.source).toMutableSet()
+            if (entity.downloadPermitted) capabilities += com.aurora.app.source.SourceCapability.DOWNLOAD
             entity.id to com.aurora.app.source.SourceMetadata(
                 trackId = com.aurora.app.source.SourceTrackId(entity.source, entity.sourceTrackId),
                 title = entity.title,
@@ -163,10 +166,41 @@ class LibraryRepository(private val database: AuroraDatabase) {
                 durationMs = entity.durationMs,
                 artworkUri = entity.artworkUrl?.takeIf { it.isNotBlank() }?.let { runCatching { android.net.Uri.parse(it) }.getOrNull() },
                 localUri = null,
-                sourceCapabilities = com.aurora.app.source.capabilitiesForOnlineSource(entity.source),
+                sourceCapabilities = capabilities,
                 externalUri = com.aurora.app.source.externalUriForOnlineSource(entity.source, entity.sourceTrackId)
             )
         }
+
+    /**
+     * Refreshes mutable online metadata (download permission, artwork) on an
+     * already-saved remote row without touching its local file or original save
+     * time. Used when the live source reports a different capability.
+     */
+    fun refreshSavedOnlineMetadata(metadata: com.aurora.app.source.SourceMetadata): Boolean {
+        val row = trackDao.getBySource(metadata.trackId.source, metadata.trackId.value) ?: return false
+        if (!row.isSaved) return false
+        val permitted = metadata.sourceCapabilities.contains(com.aurora.app.source.SourceCapability.DOWNLOAD)
+        val artwork = metadata.artworkUri?.toString()
+        if (row.downloadPermitted == permitted && row.artworkUrl == artwork) return true
+        return trackDao.update(
+            row.copy(
+                downloadPermitted = permitted,
+                artworkUrl = artwork ?: row.artworkUrl,
+                updatedAt = System.currentTimeMillis()
+            )
+        ) > 0
+    }
+
+    /** Aurora-owned tracks minus [ids] (hides saved entries superseded by a download). */
+    fun getAuroraTracksExcluding(ids: Set<Long>): List<Track> =
+        getAuroraTrackEntities().filter { it.id !in ids }.map { it.toTrack() }
+
+    /** Online identities that already have a verified local file inside Aurora storage. */
+    fun getDownloadedSourceKeys(): Set<Pair<String, String>> =
+        getAuroraTrackEntities()
+            .filter { !it.localPath.isNullOrBlank() && it.source.isNotBlank() && it.sourceTrackId.isNotBlank() }
+            .map { it.source to it.sourceTrackId }
+            .toSet()
 }
 
 /**

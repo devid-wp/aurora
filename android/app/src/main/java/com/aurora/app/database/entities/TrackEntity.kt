@@ -74,6 +74,15 @@ data class TrackEntity(
      */
     @ColumnInfo(name = "is_saved")
     val isSaved: Boolean = false,
+    /**
+     * True when the online source explicitly permitted a persistent download
+     * when this entry was saved. It only drives the Library's download
+     * affordance for remote entries and is always re-verified against the live
+     * source before any bytes are fetched — it is never a substitute for the
+     * source's own access checks.
+     */
+    @ColumnInfo(name = "download_permitted")
+    val downloadPermitted: Boolean = false,
     @ColumnInfo(name = "created_at")
     val createdAt: Long = System.currentTimeMillis(),
     @ColumnInfo(name = "updated_at")

@@ -1453,20 +1453,11 @@ class SoundCloudSource(
         return safeUri(normalized)
     }
 
-    private fun extensionForContentType(contentType: String?): String = when {
-        contentType == null -> ".mp3"
-        contentType.contains("flac") -> ".flac"
-        contentType.contains("wav") || contentType.contains("wave") -> ".wav"
-        contentType.contains("aac") -> ".aac"
-        contentType.contains("ogg") || contentType.contains("opus") -> ".ogg"
-        contentType.contains("mp4") || contentType.contains("m4a") -> ".m4a"
-        else -> ".mp3"
-    }
+    private fun extensionForContentType(contentType: String?): String =
+        audioExtensionForContentType(contentType)
 
-    private fun sanitizeFilename(name: String): String {
-        val cleaned = name.replace(Regex("[\\/:*?\"<>|]"), "_").replace(Regex("\\s+"), "_").trim('_')
-        return if (cleaned.isBlank()) "soundcloud_track" else cleaned
-    }
+    private fun sanitizeFilename(name: String): String =
+        sanitizeAudioFilename(name, "soundcloud_track")
 
     // 32 random bytes -> 43 base64url chars, within the RFC 7636 43-128
     // character range for PKCE code_verifiers.

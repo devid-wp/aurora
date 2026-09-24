@@ -115,4 +115,15 @@ object AuroraDatabaseMigrations {
             db.execSQL("CREATE INDEX IF NOT EXISTS index_favorites_track_id ON favorites(track_id)")
         }
     }
+
+    /**
+     * Records whether a saved online entry's source explicitly permitted a
+     * persistent download at save time. Existing rows are preserved and default
+     * to "not permitted"; the live source is re-checked before any download.
+     */
+    val MIGRATION_6_7 = object : Migration(6, 7) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE tracks ADD COLUMN download_permitted INTEGER NOT NULL DEFAULT 0")
+        }
+    }
 }

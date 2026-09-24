@@ -3,6 +3,9 @@ package com.aurora.app.source
 import android.net.Uri
 import com.aurora.app.BuildConfig
 import java.io.File
+import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.net.URLEncoder
 
 /**
@@ -16,7 +19,10 @@ class AudiusSource(
 ) : MusicSource {
 
     override val sourceId: String = "audius"
-    override val capabilities: Set<SourceCapability> = setOf(SourceCapability.STREAM)
+    override val capabilities: Set<SourceCapability> = setOf(
+        SourceCapability.STREAM,
+        SourceCapability.DOWNLOAD
+    )
 
     private fun headers(): Map<String, String> {
         val key = apiKeyProvider().trim()
@@ -124,11 +130,139 @@ class AudiusSource(
         }
     }
 
-    override fun checkDownloadAvailability(track: SourceMetadata): DownloadCapability =
-        DownloadCapability(DownloadAvailability.UNAVAILABLE, "Audius tracks stream online only — downloads are not offered")
+    override fun checkDownloadAvailability(track: SourceMetadata): DownloadCapability = when {
+        track.sourceCapabilities.contains(SourceCapability.BLOCKED) ->
+            DownloadCapability(DownloadAvailability.BLOCKED, "This Audius track is unavailable")
+        track.sourceCapabilities.contains(SourceCapability.DOWNLOAD) ->
+            DownloadCapability(DownloadAvailability.AVAILABLE, "Audius explicitly permits downloading this track")
+        else ->
+            DownloadCapability(DownloadAvailability.UNAVAILABLE, "The artist has not enabled downloads for this Audius track")
+    }
 
-    override fun download(track: SourceMetadata, targetDir: File): DownloadResult =
-        DownloadResult(success = false, error = "Audius tracks stream online only — downloads are not offered")
+    /**
+     * Persistent download through the official `GET /tracks/{id}/download`
+     * endpoint, which redirects to the file Audius is willing to serve. This is
+     * only reached when the track explicitly carries [SourceCapability.DOWNLOAD],
+     * and the live track is re-checked first so a stale capability can never
+     * authorise a download. No URL is ever guessed from the stream URL.
+     */
+    override fun download(track: SourceMetadata, targetDir: File): DownloadResult {
+        val verified = verifyDownloadPermitted(track)
+            ?: return DownloadResult(success = false, error = "Audius does not permit downloading this track")
+        val response = try {
+            httpClient.getBytes(downloadEndpoint(verified.trackId.value), headers())
+        } catch (e: Exception) {
+            return DownloadResult(success = false, error = e.message ?: "Audius download failed")
+        }
+        if (response.statusCode !in 200..299) {
+            return DownloadResult(success = false, error = "Audius download failed (HTTP ${response.statusCode})")
+        }
+        val bytes = response.bytes
+        if (bytes == null || bytes.isEmpty()) {
+            return DownloadResult(success = false, error = "Audius returned no download data")
+        }
+        val extension = audioExtensionForContentType(response.contentType)
+        val target = File(targetDir, sanitizeAudioFilename(verified.title, "audius_track") + extension)
+        return try {
+            targetDir.mkdirs()
+            target.writeBytes(bytes)
+            DownloadResult(success = true, localUri = Uri.fromFile(target), localPath = target.absolutePath)
+        } catch (e: Exception) {
+            DownloadResult(success = false, error = e.message ?: "Audius download failed")
+        }
+    }
+
+    /**
+     * Streaming download of the official download file with byte progress and
+     * cooperative cancellation, mirroring the SoundCloud pipeline. Reads the
+     * response incrementally so a large original upload never has to be held in
+     * memory, writes to a temp file and only renames it once complete.
+     */
+    override fun downloadWithProgress(
+        track: SourceMetadata,
+        targetDir: File,
+        onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit,
+        isCancelled: () -> Boolean
+    ): DownloadResult {
+        val verified = verifyDownloadPermitted(track)
+            ?: return DownloadResult(success = false, error = "Audius does not permit downloading this track")
+        val safeBase = sanitizeAudioFilename(verified.title, "audius_track")
+        var connection: HttpURLConnection? = null
+        var temp: File? = null
+        return try {
+            connection = URL(downloadEndpoint(verified.trackId.value)).openConnection() as HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 15000
+            connection.readTimeout = 60000
+            connection.instanceFollowRedirects = true
+            connection.doInput = true
+            connection.setRequestProperty("Accept", "application/octet-stream")
+            headers().forEach { (key, value) -> connection.setRequestProperty(key, value) }
+            val code = connection.responseCode
+            if (code !in 200..299) {
+                connection.disconnect()
+                return DownloadResult(success = false, error = "Audius download failed (HTTP $code)")
+            }
+            val contentType = connection.getHeaderField("Content-Type")
+            val total = connection.contentLengthLong.takeIf { it > 0L } ?: 0L
+            val extension = audioExtensionForContentType(contentType)
+            targetDir.mkdirs()
+            val target = File(targetDir, "$safeBase$extension")
+            temp = File(targetDir, "$safeBase$extension.part").apply { delete() }
+            connection.inputStream.use { input ->
+                FileOutputStream(temp!!).use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    var downloaded = 0L
+                    while (true) {
+                        if (isCancelled()) {
+                            temp!!.delete()
+                            connection.disconnect()
+                            return DownloadResult(success = false, error = "Download cancelled")
+                        }
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        output.write(buffer, 0, read)
+                        downloaded += read
+                        onProgress(downloaded, total)
+                    }
+                    output.flush()
+                }
+            }
+            connection.disconnect()
+            if (isCancelled()) {
+                temp!!.delete()
+                return DownloadResult(success = false, error = "Download cancelled")
+            }
+            if (temp!!.length() <= 0L) {
+                temp!!.delete()
+                return DownloadResult(success = false, error = "Audius returned no download data")
+            }
+            if (target.exists()) target.delete()
+            if (!temp!!.renameTo(target)) {
+                temp!!.copyTo(target, overwrite = true)
+                temp!!.delete()
+            }
+            onProgress(target.length(), target.length())
+            DownloadResult(success = true, localUri = Uri.fromFile(target), localPath = target.absolutePath)
+        } catch (e: Exception) {
+            temp?.delete()
+            DownloadResult(success = false, error = e.message ?: "Audius download failed")
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    /**
+     * Re-fetches the live track and returns it only when the source still
+     * explicitly permits a download. Null means "do not download".
+     */
+    private fun verifyDownloadPermitted(track: SourceMetadata): SourceMetadata? {
+        if (!track.sourceCapabilities.contains(SourceCapability.DOWNLOAD)) return null
+        val fresh = getTrack(track.trackId) ?: return null
+        return fresh.takeIf { it.sourceCapabilities.contains(SourceCapability.DOWNLOAD) }
+    }
+
+    private fun downloadEndpoint(trackId: String): String = apiUrl("/tracks/$trackId/download")
 
     private fun extractTrackObjects(rawJson: String): List<String> {
         val array = extractDataValue(rawJson)?.trim() ?: return emptyList()
@@ -240,10 +374,16 @@ class AudiusSource(
             extractJsonBoolean(rawJson, "is_stream_gated") ||
             streamAccessDenied(rawJson)
 
-        val capabilities = if (blocked) {
-            setOf(SourceCapability.BLOCKED)
+        val capabilities = linkedSetOf<SourceCapability>()
+        if (blocked) {
+            capabilities += SourceCapability.BLOCKED
         } else {
-            setOf(SourceCapability.STREAM)
+            capabilities += SourceCapability.STREAM
+            // Download is offered only when the API explicitly grants it. The
+            // artist flag (`is_downloadable`), the current user's access
+            // (`access.download`) and the absence of download gating are all
+            // required; a missing/unknown flag means "not downloadable".
+            if (downloadPermitted(rawJson)) capabilities += SourceCapability.DOWNLOAD
         }
 
         return SourceMetadata(
@@ -261,6 +401,19 @@ class AudiusSource(
     private fun streamAccessDenied(rawJson: String): Boolean {
         val access = extractJsonObject(rawJson, "access")
         return hasJsonKey(access, "stream") && !extractJsonBoolean(access, "stream")
+    }
+
+    /**
+     * True only when the track object explicitly permits a persistent download:
+     * the artist enabled downloads (`is_downloadable`), the current user's
+     * `access.download` is true, and the track is not download-gated. Aurora
+     * never infers download permission from the presence of a stream URL.
+     */
+    private fun downloadPermitted(rawJson: String): Boolean {
+        if (!extractJsonBoolean(rawJson, "is_downloadable")) return false
+        if (extractJsonBoolean(rawJson, "is_download_gated")) return false
+        val access = extractJsonObject(rawJson, "access")
+        return hasJsonKey(access, "download") && extractJsonBoolean(access, "download")
     }
 
     private fun hasJsonKey(rawJson: String, key: String): Boolean =

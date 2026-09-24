@@ -80,4 +80,35 @@ class LibraryReconciliationTest {
             supersededSavedOnlineIds(mapOf(metadata(11L, "audius", "abc")), emptyList()).isEmpty()
         )
     }
+
+    @Test
+    fun localCopySupersedesSavedEntryEvenWithoutDownloadJob() {
+        // The download job record may have been removed while the file stays in
+        // the library; the saved remote entry must still stay hidden.
+        val saved = mapOf(
+            metadata(11L, "audius", "abc"),
+            metadata(22L, "audius", "def")
+        )
+
+        val superseded = supersededSavedOnlineIds(
+            savedMetadata = saved,
+            downloads = emptyList(),
+            localCopySourceKeys = setOf("audius" to "abc")
+        )
+
+        assertEquals(setOf(11L), superseded)
+    }
+
+    @Test
+    fun localCopyFromAnotherSourceDoesNotSupersede() {
+        val saved = mapOf(metadata(11L, "audius", "abc"))
+
+        val superseded = supersededSavedOnlineIds(
+            savedMetadata = saved,
+            downloads = emptyList(),
+            localCopySourceKeys = setOf("soundcloud" to "abc")
+        )
+
+        assertTrue(superseded.isEmpty())
+    }
 }
